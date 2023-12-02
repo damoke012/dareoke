@@ -1,0 +1,22 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring-stack
+  namespace: argocd
+spec:
+  project: default
+  source:
+    helm: 
+      valueFiles:
+    path: kube-prometheus-stack
+        - values.yaml
+    repoURL: https://github.com/damoke012/dareoke.git
+    targetRevision: HEAD
+  destination:
+    server: "https://kubernetes.default.svc"
+    namespace: monitoring
+  synchPolicy:
+    automated:
+      prune: true 
+      selfHeal: true 
+      
