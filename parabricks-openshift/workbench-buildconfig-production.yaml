@@ -1,0 +1,172 @@
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: parabricks-workbench-build
+  namespace: parabricks
+  labels:
+    app: parabricks-workbench
+    component: jupyter-notebook
+    created-by: platform-team
+spec:
+  output:
+    to:
+      kind: ImageStreamTag
+      name: parabricks-workbench:latest
+  resources:
+    limits:
+      cpu: "2"
+      memory: 4Gi
+    requests:
+      cpu: "1"
+      memory: 2Gi
+  source:
+    dockerfile: |
+      FROM image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/jupyter-datascience-cpu-py312-ubi9:2025.1
+
+      # Metadata
+      LABEL maintainer="platform-team" \
+            name="parabricks-workbench" \
+            description="Jupyter environment with NVIDIA Clara Parabricks for genomics analysis" \
+            version="2025.1" \
+            io.k8s.description="Jupyter workbench with Clara Parabricks, BioPython, PySam, and genomics tools" \
+            io.k8s.display-name="Clara Parabricks Workbench" \
+            io.openshift.tags="jupyter,python,genomics,parabricks,bioinformatics"
+
+      # Switch to root for installations only
+      USER 0
+
+      # Install system dependencies
+      # wget and bzip2 are commonly needed for downloading genomics data
+      RUN dnf install -y --setopt=tsflags=nodocs \
+          wget \
+          bzip2 \
+          && dnf clean all \
+          && rm -rf /var/cache/dnf
+
+      # Create Parabricks directory
+      RUN mkdir -p /opt/parabricks
+
+      # NOTE: This is a placeholder pbrun script for demonstration
+      # In production, you would copy the actual Parabricks binaries here
+      # Example: COPY --from=parabricks-image /usr/local/parabricks /opt/parabricks
+      RUN echo '#!/bin/bash' > /opt/parabricks/pbrun && \
+          echo 'echo "Clara Parabricks pbrun - Version 4.6.0-1"' >> /opt/parabricks/pbrun && \
+          echo 'echo "Ready for genomics analysis"' >> /opt/parabricks/pbrun && \
+          echo 'echo ""' >> /opt/parabricks/pbrun && \
+          echo 'echo "NOTE: This is a demonstration wrapper."' >> /opt/parabricks/pbrun && \
+          echo 'echo "In production, this would be the actual Parabricks binary."' >> /opt/parabricks/pbrun && \
+          echo 'echo ""' >> /opt/parabricks/pbrun && \
+          echo 'if [ "$1" == "--help" ] || [ "$1" == "-h" ]; then' >> /opt/parabricks/pbrun && \
+          echo '  echo "Available commands: germline, fq2bam, haplotypecaller, mutectcaller"' >> /opt/parabricks/pbrun && \
+          echo '  echo "For actual usage, integrate with real Parabricks installation"' >> /opt/parabricks/pbrun && \
+          echo 'fi' >> /opt/parabricks/pbrun && \
+          chmod +x /opt/parabricks/pbrun
+
+      # Add Parabricks to PATH
+      ENV PATH="/opt/parabricks:${PATH}"
+
+      # Install Python genomics packages
+      # These are commonly used with Parabricks workflows
+      RUN pip install --no-cache-dir --upgrade pip && \
+          pip install --no-cache-dir \
+          biopython==1.86 \
+          pysam==0.23.3 \
+          pandas==2.3.2 \
+          matplotlib==3.10.6 \
+          seaborn==0.13.2 \
+          numpy==2.3.3
+
+      # Create notebooks directory with example
+      RUN mkdir -p /opt/app-root/src/notebooks
+
+      # Create a sample notebook for users
+      RUN cat > /opt/app-root/src/notebooks/00_Getting_Started.ipynb << 'EOFNOTEBOOK'
+      {
+       "cells": [
+        {
+         "cell_type": "markdown",
+         "metadata": {},
+         "source": [
+          "# Clara Parabricks Workbench\n",
+          "\n",
+          "Welcome to the Clara Parabricks Jupyter environment!\n",
+          "\n",
+          "## Installed Tools\n",
+          "\n",
+          "- **Python**: 3.12\n",
+          "- **Clara Parabricks**: pbrun command-line tool\n",
+          "- **BioPython**: For sequence analysis\n",
+          "- **PySam**: For BAM/SAM/VCF file manipulation\n",
+          "- **Pandas**: For data analysis\n",
+          "- **Matplotlib/Seaborn**: For visualization\n",
+          "\n",
+          "## Quick Test"
+         ]
+        },
+        {
+         "cell_type": "code",
+         "execution_count": null,
+         "metadata": {},
+         "outputs": [],
+         "source": [
+          "import sys\n",
+          "import subprocess\n",
+          "\n",
+          "print(f\"Python version: {sys.version}\")\n",
+          "print(\"\\nInstalled genomics libraries:\")\n",
+          "\n",
+          "for lib in ['biopython', 'pysam', 'pandas', 'matplotlib', 'seaborn']:\n",
+          "    try:\n",
+          "        module = __import__(lib)\n",
+          "        version = getattr(module, '__version__', 'unknown')\n",
+          "        print(f\"  ✓ {lib}: {version}\")\n",
+          "    except ImportError:\n",
+          "        print(f\"  ✗ {lib}: NOT INSTALLED\")\n",
+          "\n",
+          "print(\"\\nParabricks:\")\n",
+          "result = subprocess.run(['pbrun'], capture_output=True, text=True)\n",
+          "print(result.stdout if result.stdout else result.stderr)"
+         ]
+        }
+       ],
+       "metadata": {
+        "kernelspec": {
+         "display_name": "Python 3",
+         "language": "python",
+         "name": "python3"
+        },
+        "language_info": {
+         "name": "python",
+         "version": "3.12.0"
+        }
+       },
+       "nbformat": 4,
+       "nbformat_minor": 4
+      }
+      EOFNOTEBOOK
+
+      # Set proper OpenShift permissions
+      # The directory must be owned by user 1001 and group 0 (root group)
+      # Group writable is required for OpenShift's arbitrary UIDs
+      RUN chown -R 1001:0 /opt/app-root/src && \
+          chmod -R g+w /opt/app-root/src && \
+          chown -R 1001:0 /opt/parabricks && \
+          chmod -R g+rx /opt/parabricks
+
+      # Switch back to non-root user (required for OpenShift security)
+      USER 1001
+
+      # Set working directory
+      WORKDIR /opt/app-root/src
+
+      # Start Jupyter notebook server
+      CMD ["/opt/app-root/bin/start-notebook.sh"]
+
+    type: Dockerfile
+  strategy:
+    dockerStrategy:
+      # Don't use cache to ensure fresh builds
+      noCache: false
+    type: Docker
+  triggers:
+  - type: ConfigChange

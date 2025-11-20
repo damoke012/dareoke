@@ -1,0 +1,29 @@
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: parabricks-workbench
+  namespace: redhat-ods-applications
+  labels:
+    app.kubernetes.io/created-by: byon
+    opendatahub.io/notebook-image: "true"
+  annotations:
+    opendatahub.io/notebook-image-url: "https://github.com/NVIDIA/clara-parabricks"
+    opendatahub.io/notebook-image-name: "Clara Parabricks Workbench"
+    opendatahub.io/notebook-image-desc: "Jupyter environment with NVIDIA Clara Parabricks for genomics analysis. Includes BioPython, PySam, and other genomics tools."
+    opendatahub.io/notebook-image-order: "100"
+spec:
+  lookupPolicy:
+    local: true
+  tags:
+  - name: "2025.1"
+    annotations:
+      opendatahub.io/notebook-software: '[{"name":"Python","version":"3.12"},{"name":"Clara Parabricks","version":"4.6.0-1"}]'
+      opendatahub.io/notebook-python-dependencies: '[{"name":"BioPython","version":"1.86"},{"name":"PySam","version":"0.23.3"},{"name":"Pandas","version":"2.3.2"},{"name":"Matplotlib","version":"3.10.6"},{"name":"Seaborn","version":"0.13.2"}]'
+      openshift.io/imported-on: "2025-11-14"
+    from:
+      kind: DockerImage
+      name: image-registry.openshift-image-registry.svc:5000/parabricks/parabricks-workbench:latest
+    importPolicy:
+      importMode: Legacy
+    referencePolicy:
+      type: Local

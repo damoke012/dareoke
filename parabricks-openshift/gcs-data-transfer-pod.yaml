@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gcs-data-transfer
+  namespace: parabricks
+  labels:
+    app: data-transfer
+spec:
+  restartPolicy: Never
+  volumes:
+  - name: parabricks-data
+    persistentVolumeClaim:
+      claimName: parabricks-data
+  containers:
+  - name: gsutil
+    image: google/cloud-sdk:alpine
+    command: ["/bin/sh", "-c", "sleep infinity"]
+    stdin: true
+    tty: true
+    volumeMounts:
+    - name: parabricks-data
+      mountPath: /data
+    resources:
+      requests:
+        memory: "1Gi"
+        cpu: "500m"
+      limits:
+        memory: "2Gi"
+        cpu: "1"

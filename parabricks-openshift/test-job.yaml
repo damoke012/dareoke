@@ -1,0 +1,54 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: parabricks-test-job
+  namespace: parabricks
+  labels:
+    app: parabricks-test
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app: parabricks-test
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: parabricks
+        image: image-registry.openshift-image-registry.svc:5000/parabricks/clara-parabricks:latest
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          echo "=========================================="
+          echo "Clara Parabricks Test Job"
+          echo "=========================================="
+          echo ""
+          echo "Checking Parabricks installation..."
+          echo ""
+
+          # Check if pbrun exists
+          if command -v pbrun &> /dev/null; then
+            echo "✓ pbrun found at: $(which pbrun)"
+            echo ""
+            echo "Parabricks version:"
+            pbrun version || echo "Version check failed"
+          else
+            echo "✗ pbrun not found in PATH"
+            echo "Searching for pbrun..."
+            find / -name pbrun -type f 2>/dev/null || echo "pbrun binary not found"
+          fi
+
+          echo ""
+          echo "Build info:"
+          cat /etc/build-info 2>/dev/null || echo "No build info available"
+          echo ""
+          echo "=========================================="
+          echo "Test completed"
+          echo "=========================================="
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1"

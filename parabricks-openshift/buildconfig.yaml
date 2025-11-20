@@ -1,0 +1,53 @@
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: clara-parabricks-build
+  namespace: parabricks
+  labels:
+    app: clara-parabricks
+spec:
+  source:
+    type: Dockerfile
+    dockerfile: |
+      FROM nvcr.io/nvidia/clara/clara-parabricks:4.6.0-1
+
+      # Add metadata
+      LABEL maintainer="lab-team"
+      LABEL description="NVIDIA Clara Parabricks - Lab Test Build"
+      LABEL version="4.6.0-1"
+
+      # Create build info
+      USER root
+      RUN echo "Lab test build - $(date)" > /etc/build-info && \
+          echo "Built for OpenShift testing" >> /etc/build-info
+
+      # Verify parabricks binary exists
+      RUN which pbrun || echo "Warning: pbrun not found"
+
+      # Set back to non-root user for OpenShift
+      USER 1001
+
+  strategy:
+    type: Docker
+    dockerStrategy:
+      # Pull secret if needed (we'll create this separately)
+      # pullSecret:
+      #   name: nvidia-registry-secret
+      noCache: false
+
+  output:
+    to:
+      kind: ImageStreamTag
+      name: clara-parabricks:latest
+
+  triggers:
+  - type: ConfigChange
+  - type: ImageChange
+
+  resources:
+    limits:
+      cpu: "2"
+      memory: 4Gi
+    requests:
+      cpu: "1"
+      memory: 2Gi

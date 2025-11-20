@@ -1,0 +1,102 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gcs-data-transfer-job
+  namespace: parabricks
+  labels:
+    app: data-transfer
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: data-transfer
+    spec:
+      restartPolicy: Never
+      volumes:
+      - name: parabricks-data
+        persistentVolumeClaim:
+          claimName: parabricks-data
+      - name: gcp-credentials
+        secret:
+          secretName: gcp-service-account-key
+          optional: true
+      containers:
+      - name: gsutil
+        image: google/cloud-sdk:alpine
+        command: ["/bin/sh"]
+        args:
+        - -c
+        - |
+          set -e
+
+          echo "=============================================="
+          echo "GCS to OpenShift Data Transfer Job"
+          echo "=============================================="
+          echo "Started: $(date)"
+          echo ""
+
+          # Check if service account key exists
+          if [ -f /secrets/gcp/key.json ]; then
+            echo "✓ Found GCP service account key, authenticating..."
+            gcloud auth activate-service-account --key-file=/secrets/gcp/key.json
+            echo "✓ Authentication successful"
+          else
+            echo "⚠ No service account key found at /secrets/gcp/key.json"
+            echo "⚠ You need to create a secret with your GCP service account key:"
+            echo ""
+            echo "  oc create secret generic gcp-service-account-key \\"
+            echo "    --from-file=key.json=/path/to/your/service-account-key.json \\"
+            echo "    -n parabricks"
+            echo ""
+            exit 1
+          fi
+
+          # Set project (update this with your GCP project ID)
+          PROJECT_ID="${GCP_PROJECT_ID:-your-project-id}"
+          echo "Setting GCP project: $PROJECT_ID"
+          gcloud config set project "$PROJECT_ID"
+
+          # Transfer data
+          SOURCE_BUCKET="${GCS_SOURCE_PATH:-gs://anasuya_backups/Parabricks_Pathogentest/Parabricks_pathogen_Test}"
+          DEST_PATH="/data"
+
+          echo ""
+          echo "Transferring data..."
+          echo "  Source: $SOURCE_BUCKET"
+          echo "  Destination: $DEST_PATH"
+          echo ""
+
+          # Use gsutil with multi-threading for faster transfer
+          gsutil -m cp -r "$SOURCE_BUCKET/*" "$DEST_PATH/"
+
+          # Verify transfer
+          echo ""
+          echo "✓ Transfer complete!"
+          echo ""
+          echo "Data transferred to PVC:"
+          du -sh "$DEST_PATH"/*
+          echo ""
+          echo "Total size:"
+          du -sh "$DEST_PATH"
+          echo ""
+          echo "Completed: $(date)"
+
+        env:
+        - name: GCP_PROJECT_ID
+          value: "your-gcp-project-id"  # Update this
+        - name: GCS_SOURCE_PATH
+          value: "gs://anasuya_backups/Parabricks_Pathogentest/Parabricks_pathogen_Test"
+        volumeMounts:
+        - name: parabricks-data
+          mountPath: /data
+        - name: gcp-credentials
+          mountPath: /secrets/gcp
+          readOnly: true
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "4Gi"
+            cpu: "2"

@@ -1,0 +1,105 @@
+# Ansuya Jupyter Deployment with PVC for Parabricks genomics workloads
+# Tested with E. coli ONT data - 469 variants called successfully
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ansuya-jupyter-data
+  namespace: parabricks
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ansuya-jupyter
+  namespace: parabricks
+  labels:
+    app: ansuya-jupyter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ansuya-jupyter
+  template:
+    metadata:
+      labels:
+        app: ansuya-jupyter
+    spec:
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: jupyter
+        image: image-registry.openshift-image-registry.svc:5000/parabricks/parabricks-jupyter-bakta:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8888
+          name: jupyter
+        env:
+        - name: JUPYTER_ENABLE_LAB
+          value: "yes"
+        - name: LD_LIBRARY_PATH
+          value: "/opt/conda/lib:/opt/parabricks/binaries/lib:/usr/lib64"
+        resources:
+          requests:
+            nvidia.com/gpu: "2"
+            memory: "48Gi"
+            cpu: "2"
+          limits:
+            nvidia.com/gpu: "2"
+            memory: "64Gi"
+            cpu: "4"
+        volumeMounts:
+        - name: data
+          mountPath: /opt/app-root/src
+        readinessProbe:
+          httpGet:
+            path: /api
+            port: 8888
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /api
+            port: 8888
+          initialDelaySeconds: 30
+          periodSeconds: 10
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: ansuya-jupyter-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ansuya-jupyter
+  namespace: parabricks
+spec:
+  selector:
+    app: ansuya-jupyter
+  ports:
+  - port: 8888
+    targetPort: 8888
+    name: jupyter
+  type: ClusterIP
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: ansuya-jupyter
+  namespace: parabricks
+spec:
+  to:
+    kind: Service
+    name: ansuya-jupyter
+  port:
+    targetPort: jupyter
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

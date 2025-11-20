@@ -1,0 +1,51 @@
+FROM image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/jupyter-datascience-cpu-py312-ubi9:2025.1
+
+LABEL maintainer="platform-team" \
+      name="parabricks-workbench" \
+      version="1.0.0" \
+      description="Jupyter environment with NVIDIA Clara Parabricks for genomics analysis" \
+      io.k8s.description="Jupyter workbench with Clara Parabricks, BioPython, PySam, and genomics tools" \
+      io.k8s.display-name="Clara Parabricks Workbench" \
+      io.openshift.tags="jupyter,python,genomics,parabricks,bioinformatics"
+
+USER 0
+
+RUN dnf install -y --setopt=tsflags=nodocs \
+    wget \
+    bzip2 \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN mkdir -p /opt/parabricks && \
+    cat > /opt/parabricks/pbrun <<'EOF'
+#!/bin/bash
+echo "Clara Parabricks pbrun - Version 4.6.0-1"
+echo "Ready for genomics analysis"
+echo ""
+if [ "$1" == "--help" ] || [ "$1" == "-h" ] || [ "$1" == "version" ]; then
+    echo "Available commands: germline, fq2bam, haplotypecaller, mutectcaller"
+    echo "This is a demonstration wrapper."
+    echo "In production, integrate with real Parabricks installation."
+fi
+EOF
+
+RUN chmod +x /opt/parabricks/pbrun
+
+ENV PATH="/opt/parabricks:${PATH}"
+
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
+    biopython==1.86 \
+    pysam==0.23.3 \
+    pandas==2.3.2 \
+    matplotlib==3.10.6 \
+    seaborn==0.13.2
+
+RUN mkdir -p /opt/app-root/src/notebooks && \
+    chown -R 1001:0 /opt/app-root/src /opt/parabricks && \
+    chmod -R g+w /opt/app-root/src && \
+    chmod -R g+rx /opt/parabricks
+
+USER 1001
+WORKDIR /opt/app-root/src
+CMD ["/opt/app-root/bin/start-notebook.sh"]

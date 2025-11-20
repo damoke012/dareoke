@@ -1,0 +1,98 @@
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: parabricks-workbench-build
+  namespace: parabricks
+  labels:
+    app: parabricks-workbench
+    component: jupyter-notebook
+spec:
+  output:
+    to:
+      kind: ImageStreamTag
+      name: parabricks-workbench:1.0.0
+  resources:
+    limits:
+      cpu: "2"
+      memory: 4Gi
+    requests:
+      cpu: "1"
+      memory: 2Gi
+  source:
+    dockerfile: |
+      # ============================================
+      # STAGE 1: Get Parabricks from NVIDIA image
+      # ============================================
+      FROM nvcr.io/nvidia/clara/clara-parabricks:4.6.0-1 AS parabricks-source
+
+      # ============================================
+      # STAGE 2: Build final workbench image
+      # ============================================
+      FROM image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/jupyter-datascience-cpu-py312-ubi9:2025.1
+
+      # Metadata
+      LABEL maintainer="platform-team" \
+            name="parabricks-workbench" \
+            version="1.0.0" \
+            description="Jupyter environment with NVIDIA Clara Parabricks for genomics analysis" \
+            io.k8s.description="Jupyter workbench with Clara Parabricks, BioPython, PySam, and genomics tools" \
+            io.k8s.display-name="Clara Parabricks Workbench" \
+            io.openshift.tags="jupyter,python,genomics,parabricks,bioinformatics" \
+            parabricks.version="4.6.0-1" \
+            python.version="3.12"
+
+      USER 0
+
+      # Install system dependencies (minimal set)
+      RUN dnf install -y --setopt=tsflags=nodocs \
+          wget \
+          bzip2 \
+          && dnf clean all \
+          && rm -rf /var/cache/dnf
+
+      # Copy Parabricks binary from stage 1 (instead of placeholder script)
+      # This copies the REAL Parabricks installation
+      COPY --from=parabricks-source /usr/local/parabricks /opt/parabricks
+
+      # Alternative: If you want to keep the demo wrapper for now, uncomment this:
+      # RUN mkdir -p /opt/parabricks && \
+      #     echo '#!/bin/bash' > /opt/parabricks/pbrun && \
+      #     echo 'echo "Clara Parabricks pbrun - Version 4.6.0-1"' >> /opt/parabricks/pbrun && \
+      #     echo 'echo "Ready for genomics analysis"' >> /opt/parabricks/pbrun && \
+      #     chmod +x /opt/parabricks/pbrun
+
+      # Add Parabricks to PATH
+      ENV PATH="/opt/parabricks:${PATH}"
+
+      # Install Python packages for genomics workflows
+      # Pin versions for reproducibility
+      RUN pip install --no-cache-dir --upgrade pip && \
+          pip install --no-cache-dir \
+          biopython==1.86 \
+          pysam==0.23.3 \
+          pandas==2.3.2 \
+          matplotlib==3.10.6 \
+          seaborn==0.13.2 \
+          numpy==2.3.3
+
+      # Create workspace and set OpenShift-compatible permissions
+      RUN mkdir -p /opt/app-root/src/notebooks && \
+          chown -R 1001:0 /opt/app-root/src /opt/parabricks && \
+          chmod -R g+w /opt/app-root/src && \
+          chmod -R g+rx /opt/parabricks
+
+      # Security: Run as non-root user
+      USER 1001
+
+      # Set working directory
+      WORKDIR /opt/app-root/src
+
+      # Start Jupyter notebook server
+      CMD ["/opt/app-root/bin/start-notebook.sh"]
+    type: Dockerfile
+  strategy:
+    dockerStrategy:
+      noCache: false
+    type: Docker
+  triggers:
+  - type: ConfigChange

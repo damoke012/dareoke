@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: parabricks-data
+  namespace: parabricks
+  labels:
+    app: parabricks-workbench
+spec:
+  accessModes:
+    - ReadWriteOnce  # Single pod access (workbench)
+  resources:
+    requests:
+      storage: 100Gi  # 100GB to accommodate 42GB data + processing space
+  storageClassName: gp3-csi  # AWS EBS storage

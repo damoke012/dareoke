@@ -1,0 +1,19 @@
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: parabricks-workbench
+  namespace: parabricks
+spec:
+  lookupPolicy:
+    local: true
+  tags:
+  - name: latest
+    annotations:
+      description: "Latest stable version of Jupyter Workbench with Clara Parabricks"
+      openshift.io/display-name: "Parabricks Workbench (Latest)"
+  - name: "1.0.0"
+    annotations:
+      description: "Jupyter Workbench with Clara Parabricks v1.0.0"
+      openshift.io/display-name: "Parabricks Workbench v1.0.0"
+      opendatahub.io/notebook-image-name: "Parabricks Workbench v1.0.0"
+      opendatahub.io/notebook-image-desc: "Jupyter environment with NVIDIA Clara Parabricks for genomics analysis. Includes BioPython, PySam, and other genomics tools."

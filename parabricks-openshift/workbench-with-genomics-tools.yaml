@@ -1,0 +1,171 @@
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: parabricks-workbench-build
+  namespace: parabricks
+  labels:
+    app: parabricks-workbench
+    component: jupyter-notebook
+spec:
+  output:
+    to:
+      kind: ImageStreamTag
+      name: parabricks-workbench:1.3.2  # Added /opt/parabricks/lib to LD_LIBRARY_PATH
+  resources:
+    limits:
+      cpu: "2"
+      memory: 4Gi
+    requests:
+      cpu: "1"
+      memory: 2Gi
+  source:
+    dockerfile: |
+      # ============================================
+      # STAGE 1: Get Parabricks from NVIDIA image
+      # ============================================
+      FROM nvcr.io/nvidia/clara/clara-parabricks:4.6.0-1 AS parabricks-source
+
+      # ============================================
+      # STAGE 2: Build final workbench image
+      # ============================================
+      FROM image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/jupyter-datascience-cpu-py312-ubi9:2025.1
+
+      # Metadata
+      LABEL maintainer="platform-team" \
+            name="parabricks-workbench" \
+            version="1.3.2" \
+            description="Jupyter environment with NVIDIA Clara Parabricks and complete genomics toolkit" \
+            io.k8s.description="Jupyter workbench with Clara Parabricks, samtools, bwa, bcftools, SRA Toolkit, EDirect, GATK, and Python genomics libraries" \
+            io.k8s.display-name="Clara Parabricks Workbench - Full Genomics Toolkit" \
+            io.openshift.tags="jupyter,python,genomics,parabricks,bioinformatics,samtools,bwa,gatk,sra" \
+            parabricks.version="4.6.0-1" \
+            gatk.version="4.6.1.0" \
+            sratoolkit.version="3.2.0" \
+            boost.version="1.74.0" \
+            python.version="3.12"
+
+      USER 0
+
+      # Install system dependencies needed for building genomics tools
+      RUN dnf install -y --setopt=tsflags=nodocs \
+          wget \
+          bzip2 \
+          gcc \
+          gcc-c++ \
+          make \
+          zlib-devel \
+          bzip2-devel \
+          xz-devel \
+          ncurses-devel \
+          && dnf clean all \
+          && rm -rf /var/cache/dnf
+
+      # Install samtools from source
+      RUN cd /tmp && \
+          wget https://github.com/samtools/samtools/releases/download/1.19.2/samtools-1.19.2.tar.bz2 && \
+          tar -xjf samtools-1.19.2.tar.bz2 && \
+          cd samtools-1.19.2 && \
+          ./configure --prefix=/usr/local && \
+          make && \
+          make install && \
+          cd /tmp && \
+          rm -rf samtools-1.19.2*
+
+      # Install bcftools from source
+      RUN cd /tmp && \
+          wget https://github.com/samtools/bcftools/releases/download/1.19/bcftools-1.19.tar.bz2 && \
+          tar -xjf bcftools-1.19.tar.bz2 && \
+          cd bcftools-1.19 && \
+          ./configure --prefix=/usr/local && \
+          make && \
+          make install && \
+          cd /tmp && \
+          rm -rf bcftools-1.19*
+
+      # Install BWA from source
+      RUN cd /tmp && \
+          wget https://github.com/lh3/bwa/releases/download/v0.7.17/bwa-0.7.17.tar.bz2 && \
+          tar -xjf bwa-0.7.17.tar.bz2 && \
+          cd bwa-0.7.17 && \
+          sed -i 's/const uint8_t rle_auxtab\[8\];/extern const uint8_t rle_auxtab[8];/' rle.h && \
+          make && \
+          cp bwa /usr/local/bin/ && \
+          cd /tmp && \
+          rm -rf bwa-0.7.17*
+
+      # Install SRA Toolkit
+      RUN cd /tmp && \
+          wget https://ftp-trace.ncbi.nlm.nih.gov/sra/sdk/3.2.0/sratoolkit.3.2.0-centos_linux64.tar.gz && \
+          tar -xzf sratoolkit.3.2.0-centos_linux64.tar.gz && \
+          cp -r sratoolkit.3.2.0-centos_linux64/bin/* /usr/local/bin/ && \
+          cd /tmp && \
+          rm -rf sratoolkit.3.2.0-centos_linux64*
+
+      # Install Entrez Direct (EDirect)
+      RUN cd /tmp && \
+          dnf install -y perl perl-App-cpanminus perl-LWP-Protocol-https && \
+          wget https://ftp.ncbi.nlm.nih.gov/entrez/entrezdirect/edirect.tar.gz && \
+          tar -xzf edirect.tar.gz && \
+          mkdir -p /usr/local/edirect && \
+          cp -r edirect/* /usr/local/edirect/ && \
+          cd /tmp && \
+          rm -rf edirect* && \
+          dnf clean all
+
+      # Install GATK
+      RUN cd /tmp && \
+          wget https://github.com/broadinstitute/gatk/releases/download/4.6.1.0/gatk-4.6.1.0.zip && \
+          dnf install -y unzip java-17-openjdk && \
+          unzip gatk-4.6.1.0.zip && \
+          mv gatk-4.6.1.0 /usr/local/gatk && \
+          ln -s /usr/local/gatk/gatk /usr/local/bin/gatk && \
+          cd /tmp && \
+          rm -rf gatk-4.6.1.0.zip && \
+          dnf clean all
+
+      # Copy Parabricks binaries and libraries from stage 1
+      COPY --from=parabricks-source /usr/local/parabricks /opt/parabricks
+      COPY --from=parabricks-source /usr/lib/x86_64-linux-gnu/libboost_*.so.1.74.0 /usr/lib64/
+
+      # Create symlinks for boost libraries
+      RUN cd /usr/lib64 && \
+          for lib in libboost_*.so.1.74.0; do \
+            ln -sf "$lib" "${lib%.1.74.0}"; \
+          done && \
+          ldconfig
+
+      # Add tools to PATH and library path
+      ENV PATH="/opt/parabricks:/usr/local/edirect:${PATH}" \
+          LD_LIBRARY_PATH="/opt/parabricks/lib:/usr/lib64:${LD_LIBRARY_PATH}"
+
+      # Install Python packages for genomics workflows
+      RUN pip install --no-cache-dir --upgrade pip && \
+          pip install --no-cache-dir \
+          biopython==1.86 \
+          pysam==0.23.3 \
+          pandas==2.3.2 \
+          matplotlib==3.10.6 \
+          seaborn==0.13.2 \
+          numpy==2.3.3
+
+      # Create workspace and set OpenShift-compatible permissions
+      RUN mkdir -p /opt/app-root/src/notebooks && \
+          chown -R 1001:0 /opt/app-root/src /opt/parabricks && \
+          chmod -R g+w /opt/app-root/src && \
+          chmod -R g+rx /opt/parabricks
+
+      # Security: Run as non-root user
+      USER 1001
+
+      # Set working directory
+      WORKDIR /opt/app-root/src
+
+      # Start Jupyter notebook server
+      CMD ["/opt/app-root/bin/start-notebook.sh"]
+    type: Dockerfile
+  strategy:
+    dockerStrategy:
+      noCache: false
+    type: Docker
+  triggers:
+  - type: ConfigChange
