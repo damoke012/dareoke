@@ -73,3 +73,14 @@ spec:
       annotations:
         summary: "GPU {{ $labels.gpu }} is idle"
         description: "GPU {{ $labels.gpu }} has 0% utilization - this alert fires for testing Google Chat integration"
+
+    # Alert: Test alert that always fires when GPU exists (for testing notifications)
+    - alert: GPUTestAlert
+      expr: DCGM_FI_DEV_GPU_UTIL >= 0
+      for: 1m
+      labels:
+        severity: info
+        team: gpu-lab
+      annotations:
+        summary: "GPU Lab Test Alert - GPU {{ $labels.gpu }}"
+        description: "This is a test alert to verify Google Chat integration. GPU {{ $labels.gpu }} utilization: {{ $value }}%"
