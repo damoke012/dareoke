@@ -1,0 +1,97 @@
+#############################################################################
+# DEPLOYMENT EXAMPLE - Runs Continuously
+#############################################################################
+#
+# WHAT IS A DEPLOYMENT?
+# - Keeps pods running 24/7
+# - Like a web server or API service
+# - Automatically restarts if pod crashes (self-healing)
+# - Can scale up/down (add more pods for load)
+# - Good for: web apps, APIs, microservices, databases
+#
+# KEY FEATURES:
+# - replicas: 2 (runs 2 copies for high availability)
+# - Self-healing: If pod dies, creates new one automatically
+# - Rolling updates: Can update code without downtime
+# - Load balancing: Traffic distributed across pods
+#
+# CLOUD STORAGE:
+# - Uses PersistentVolumeClaim (OpenShift's S3 equivalent)
+# - Code stored in /mnt/code-storage
+# - All pods share the same storage
+#
+#############################################################################
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-service
+  labels:
+    app: demo
+    type: deployment
+spec:
+  replicas: 2
+
+  selector:
+    matchLabels:
+      app: demo
+      type: deployment
+
+  template:
+    metadata:
+      labels:
+        app: demo
+        type: deployment
+    spec:
+      # CLOUD STORAGE: Mount PersistentVolumeClaim (like S3 bucket)
+      volumes:
+      - name: code-storage
+        persistentVolumeClaim:
+          claimName: code-storage
+
+      containers:
+      - name: web
+        image: registry.access.redhat.com/ubi9/python-39:latest
+
+        # COMMAND: Run Python script from cloud storage
+        command: ["python3"]
+        args: ["/mnt/code-storage/web_server.py"]
+
+        # Mount cloud storage at /mnt/code-storage
+        volumeMounts:
+        - name: code-storage
+          mountPath: /mnt/code-storage
+
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+
+        # Health checks
+        livenessProbe:
+          exec:
+            command:
+            - /bin/bash
+            - -c
+            - echo "healthy"
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
+
+        readinessProbe:
+          exec:
+            command:
+            - /bin/bash
+            - -c
+            - echo "ready"
+          initialDelaySeconds: 3
+          periodSeconds: 5
+
+        env:
+        - name: SERVICE_TYPE
+          value: "web-server"
+        - name: LOG_LEVEL
+          value: "INFO"

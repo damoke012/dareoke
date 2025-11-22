@@ -1,0 +1,31 @@
+#############################################################################
+# CLOUD STORAGE - PersistentVolumeClaim (PVC)
+#############################################################################
+#
+# WHAT IS THIS?
+# - OpenShift's equivalent of cloud storage (like S3 bucket or Azure Blob)
+# - Provides persistent disk storage that survives pod restarts
+# - Can be shared across multiple pods
+# - Data persists even if pods are deleted
+#
+# TYPICAL USES:
+# - Store application code
+# - Store data files, logs, uploads
+# - Share files between pods
+# - Backup and recovery
+#
+#############################################################################
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: code-storage
+  labels:
+    app: demo
+spec:
+  accessModes:
+    - ReadWriteOnce  # One pod at a time can read/write
+  resources:
+    requests:
+      storage: 1Gi  # Request 1GB of storage
+  storageClassName: gp3-csi  # AWS EBS storage

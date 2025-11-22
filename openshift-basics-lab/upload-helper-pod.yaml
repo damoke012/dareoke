@@ -1,0 +1,52 @@
+#############################################################################
+# HELPER POD - Upload Code to Cloud Storage
+#############################################################################
+#
+# WHAT IS THIS?
+# - A temporary pod that mounts the PVC storage
+# - Allows you to copy files into the cloud storage
+# - After uploading files, you can delete this pod
+#
+# HOW IT WORKS:
+# 1. This pod sleeps forever (stays running)
+# 2. You can access the Terminal in OpenShift UI
+# 3. Copy/paste your Python scripts directly into the terminal
+# 4. Scripts are saved to /mnt/code-storage
+# 5. Delete this pod when done uploading
+#
+#############################################################################
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: upload-helper
+  labels:
+    app: demo
+    type: helper
+spec:
+  # Mount the same PVC that Jobs/Deployments will use
+  volumes:
+  - name: code-storage
+    persistentVolumeClaim:
+      claimName: code-storage
+
+  containers:
+  - name: uploader
+    image: registry.access.redhat.com/ubi9/python-39:latest
+
+    # Keep pod running so you can access terminal
+    command: ["/bin/bash"]
+    args: ["-c", "echo 'Upload helper ready. Use Terminal to create files.' && sleep infinity"]
+
+    # Mount storage at /mnt/code-storage
+    volumeMounts:
+    - name: code-storage
+      mountPath: /mnt/code-storage
+
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "50m"
+      limits:
+        memory: "128Mi"
+        cpu: "100m"

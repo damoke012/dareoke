@@ -1,0 +1,59 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: data-processing-job
+  labels:
+    app: demo
+    type: job
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app: demo
+        type: job
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: processor
+        image: registry.access.redhat.com/ubi8/ubi-minimal:latest
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          echo "=========================================="
+          echo "JOB: Data Processing Task"
+          echo "=========================================="
+          echo ""
+          echo "Start Time: $(date)"
+          echo ""
+          echo "Step 1: Loading data..."
+          sleep 3
+          echo "✓ Data loaded (1000 records)"
+          echo ""
+          echo "Step 2: Processing records..."
+          for i in {1..5}; do
+            echo "  Processing batch $i/5..."
+            sleep 2
+          done
+          echo "✓ All records processed"
+          echo ""
+          echo "Step 3: Generating report..."
+          sleep 2
+          echo "✓ Report generated"
+          echo ""
+          echo "Results:"
+          echo "  - Total processed: 1000 records"
+          echo "  - Success: 995"
+          echo "  - Errors: 5"
+          echo ""
+          echo "End Time: $(date)"
+          echo "=========================================="
+          echo "JOB COMPLETED SUCCESSFULLY"
+          echo "=========================================="
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"

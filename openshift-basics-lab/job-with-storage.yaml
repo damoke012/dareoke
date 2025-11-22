@@ -1,0 +1,107 @@
+#############################################################################
+# JOB EXAMPLE - Runs Once and Completes
+#############################################################################
+#
+# WHAT IS A JOB?
+# - Runs a task once until it succeeds
+# - Like a batch script or cron job
+# - Terminates when done (doesn't keep running)
+# - Good for: data processing, backups, reports, migrations
+#
+# KEY FEATURES:
+# - restartPolicy: Never (don't restart when done)
+# - Completion: Shows as "Complete" when finished
+# - Pods are kept after completion (for logs)
+#
+#############################################################################
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: data-processing-job
+  labels:
+    app: demo
+    type: job
+spec:
+  # How many times to retry if it fails
+  backoffLimit: 2
+
+  template:
+    metadata:
+      labels:
+        app: demo
+        type: job
+    spec:
+      # CRITICAL: Never restart when job completes
+      restartPolicy: Never
+
+      # VOLUMES: Mount code from ConfigMap (like S3/cloud storage)
+      volumes:
+      - name: scripts
+        configMap:
+          name: demo-scripts
+          defaultMode: 0755  # Make scripts executable
+
+      containers:
+      - name: processor
+        # Use Python image to run our script
+        image: registry.access.redhat.com/ubi9/python-39:latest
+
+        # COMMAND: Run the Python script from mounted storage
+        command: ["python3"]
+        args: ["/scripts/process_data.py"]
+
+        # Mount the scripts volume
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+
+        # Resource limits (prevents one job from using all cluster resources)
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+
+        # Environment variables (configuration)
+        env:
+        - name: JOB_TYPE
+          value: "batch-processing"
+        - name: LOG_LEVEL
+          value: "INFO"
+
+---
+#############################################################################
+# HOW TO USE THIS JOB
+#############################################################################
+#
+# 1. CREATE THE CONFIGMAP FIRST:
+#    oc apply -f configmap-scripts.yaml
+#
+# 2. CREATE THE JOB:
+#    oc apply -f job-with-storage.yaml
+#
+# 3. WATCH THE JOB:
+#    oc get jobs
+#    oc get pods
+#
+# 4. VIEW LOGS:
+#    oc logs job/data-processing-job
+#
+# 5. CHECK STATUS:
+#    oc describe job data-processing-job
+#
+# METRICS TO OBSERVE:
+# - Start time
+# - Completion time
+# - Duration
+# - Pod restarts (should be 0 for successful job)
+# - Resource usage (CPU, Memory)
+#
+# CLEANUP:
+#    oc delete job data-processing-job
+#
+#############################################################################

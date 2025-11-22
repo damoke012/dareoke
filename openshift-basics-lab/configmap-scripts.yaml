@@ -1,0 +1,90 @@
+#############################################################################
+# WHAT IS THIS?
+# This ConfigMap stores Python scripts (like code in an S3 bucket/cloud drive)
+# Pods can mount this ConfigMap as a volume to access the code
+#############################################################################
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-scripts
+  labels:
+    app: demo
+data:
+  # Script for Job (runs once and completes)
+  process_data.py: |
+    #!/usr/bin/env python3
+    import time
+    import sys
+    from datetime import datetime
+
+    print("=" * 60)
+    print("DATA PROCESSING JOB")
+    print("=" * 60)
+    print(f"Start Time: {datetime.now()}")
+    print()
+
+    print("Step 1: Loading data from cloud storage...")
+    time.sleep(2)
+    records = 1000
+    print(f"✓ Loaded {records} records")
+    print()
+
+    print("Step 2: Processing data in batches...")
+    batches = 5
+    for i in range(1, batches + 1):
+        print(f"  Processing batch {i}/{batches}...")
+        time.sleep(1)
+    print(f"✓ Processed all {batches} batches")
+    print()
+
+    print("Step 3: Generating report...")
+    time.sleep(1)
+    success = 995
+    errors = 5
+    print(f"✓ Report generated")
+    print()
+
+    print("RESULTS:")
+    print(f"  Total Records: {records}")
+    print(f"  Successful: {success}")
+    print(f"  Errors: {errors}")
+    print(f"  Success Rate: {(success/records)*100:.1f}%")
+    print()
+
+    print(f"End Time: {datetime.now()}")
+    print("=" * 60)
+    print("JOB COMPLETED SUCCESSFULLY")
+    print("=" * 60)
+
+  # Script for Deployment (runs continuously)
+  web_server.py: |
+    #!/usr/bin/env python3
+    import time
+    import random
+    import socket
+    from datetime import datetime
+
+    hostname = socket.gethostname()
+
+    print("=" * 60)
+    print("WEB SERVICE STARTED")
+    print("=" * 60)
+    print(f"Pod: {hostname}")
+    print(f"Start Time: {datetime.now()}")
+    print()
+    print("Service is running and ready to handle requests...")
+    print()
+
+    while True:
+        connections = random.randint(10, 50)
+        memory = random.randint(30, 70)
+        cpu = random.randint(20, 80)
+
+        print(f"[{datetime.now()}] Heartbeat - Pod {hostname} is healthy")
+        print(f"[{datetime.now()}] Active connections: {connections}")
+        print(f"[{datetime.now()}] Memory usage: {memory}%")
+        print(f"[{datetime.now()}] CPU usage: {cpu}%")
+        print("---")
+
+        time.sleep(30)

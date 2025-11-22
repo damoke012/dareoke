@@ -1,0 +1,72 @@
+#############################################################################
+# JOB EXAMPLE - Runs Once and Completes
+#############################################################################
+#
+# WHAT IS A JOB?
+# - Runs a task once until it succeeds
+# - Like a batch script or cron job
+# - Terminates when done (doesn't keep running)
+# - Good for: data processing, backups, reports, migrations
+#
+# KEY FEATURES:
+# - restartPolicy: Never (don't restart when done)
+# - Completion: Shows as "Complete" when finished
+# - Pods are kept after completion (for logs)
+#
+# CLOUD STORAGE:
+# - Uses PersistentVolumeClaim (OpenShift's S3 equivalent)
+# - Code stored in /mnt/code-storage
+# - Storage persists even if job is deleted
+#
+#############################################################################
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: data-processing-job
+  labels:
+    app: demo
+    type: job
+spec:
+  backoffLimit: 2
+
+  template:
+    metadata:
+      labels:
+        app: demo
+        type: job
+    spec:
+      restartPolicy: Never
+
+      # CLOUD STORAGE: Mount PersistentVolumeClaim (like S3 bucket)
+      volumes:
+      - name: code-storage
+        persistentVolumeClaim:
+          claimName: code-storage
+
+      containers:
+      - name: processor
+        image: registry.access.redhat.com/ubi9/python-39:latest
+
+        # COMMAND: Run Python script from cloud storage
+        command: ["python3"]
+        args: ["/mnt/code-storage/process_data.py"]
+
+        # Mount cloud storage at /mnt/code-storage
+        volumeMounts:
+        - name: code-storage
+          mountPath: /mnt/code-storage
+
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+
+        env:
+        - name: JOB_TYPE
+          value: "batch-processing"
+        - name: LOG_LEVEL
+          value: "INFO"

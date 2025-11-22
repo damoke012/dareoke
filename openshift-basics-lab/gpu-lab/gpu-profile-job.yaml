@@ -1,0 +1,157 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gpu-profile-job
+  labels:
+    app: gpu-profile
+    demo: rosa-gpu-lab
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: gpu-profile
+    spec:
+      restartPolicy: Never
+
+      containers:
+      - name: gpu-profiler
+        # PyTorch image with CUDA support
+        image: pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+
+        command:
+        - python3
+        - -c
+        - |
+          import torch
+          import time
+          import os
+          from datetime import datetime
+
+          def print_header(title):
+              print("\n" + "=" * 60)
+              print(f"  {title}")
+              print("=" * 60)
+
+          print("#" * 60)
+          print("#    GPU PROFILING JOB - PYTORCH BENCHMARK    #")
+          print("#" * 60)
+          print(f"\nStart Time: {datetime.now()}")
+          print(f"Pod Name: {os.environ.get('HOSTNAME', 'unknown')}")
+
+          # Check CUDA availability
+          print_header("CUDA DETECTION")
+          if not torch.cuda.is_available():
+              print("[ERROR] CUDA not available!")
+              exit(1)
+
+          device_count = torch.cuda.device_count()
+          print(f"[SUCCESS] CUDA available - {device_count} GPU(s) detected")
+
+          # GPU Properties
+          print_header("GPU PROPERTIES")
+          for i in range(device_count):
+              props = torch.cuda.get_device_properties(i)
+              print(f"\nGPU {i}: {props.name}")
+              print(f"  Compute Capability: {props.major}.{props.minor}")
+              print(f"  Total Memory: {props.total_memory / 1024**3:.2f} GB")
+              print(f"  Multi-Processors: {props.multi_processor_count}")
+              print(f"  Max Threads/Block: {props.max_threads_per_block}")
+
+          # Memory Benchmark
+          print_header("MEMORY BENCHMARK")
+          device = torch.device('cuda:0')
+
+          sizes = [1000, 2000, 4000, 8000]
+          for size in sizes:
+              try:
+                  # Allocate tensor
+                  start = time.time()
+                  tensor = torch.randn(size, size, device=device)
+                  torch.cuda.synchronize()
+                  alloc_time = time.time() - start
+
+                  mem_mb = (size * size * 4) / (1024 * 1024)  # float32 = 4 bytes
+                  print(f"  {size}x{size} matrix ({mem_mb:.1f} MB): {alloc_time*1000:.2f}ms")
+                  del tensor
+                  torch.cuda.empty_cache()
+              except RuntimeError as e:
+                  print(f"  {size}x{size}: Out of memory")
+                  break
+
+          # Compute Benchmark
+          print_header("COMPUTE BENCHMARK - Matrix Multiplication")
+
+          matrix_sizes = [(1000, 100), (2000, 50), (4000, 25)]
+          for size, iterations in matrix_sizes:
+              try:
+                  a = torch.randn(size, size, device=device)
+                  b = torch.randn(size, size, device=device)
+
+                  # Warm-up
+                  for _ in range(5):
+                      c = torch.matmul(a, b)
+                  torch.cuda.synchronize()
+
+                  # Benchmark
+                  start = time.time()
+                  for _ in range(iterations):
+                      c = torch.matmul(a, b)
+                  torch.cuda.synchronize()
+                  elapsed = time.time() - start
+
+                  ops_per_sec = iterations / elapsed
+                  gflops = (2 * size**3 * iterations) / (elapsed * 1e9)
+
+                  print(f"  {size}x{size} @ {iterations} iterations:")
+                  print(f"    Time: {elapsed:.3f}s ({elapsed/iterations*1000:.2f}ms/op)")
+                  print(f"    Throughput: {ops_per_sec:.1f} ops/s")
+                  print(f"    Performance: {gflops:.1f} GFLOPS")
+
+                  del a, b, c
+                  torch.cuda.empty_cache()
+              except RuntimeError:
+                  print(f"  {size}x{size}: Skipped (insufficient memory)")
+
+          # Memory Summary
+          print_header("MEMORY SUMMARY")
+          for i in range(device_count):
+              allocated = torch.cuda.memory_allocated(i) / 1024**2
+              reserved = torch.cuda.memory_reserved(i) / 1024**2
+              print(f"GPU {i}:")
+              print(f"  Allocated: {allocated:.1f} MB")
+              print(f"  Reserved:  {reserved:.1f} MB")
+
+          print_header("PROFILING COMPLETE")
+          print(f"""
+          Status: SUCCESS
+
+          This GPU is ready for:
+          - Deep Learning training
+          - Model inference
+          - Scientific computing
+          - GPU-accelerated workloads
+          """)
+          print(f"End Time: {datetime.now()}")
+          print("=" * 60)
+
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+            memory: "4Gi"
+          requests:
+            nvidia.com/gpu: 1
+            memory: "2Gi"
+            cpu: "1000m"
+
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"

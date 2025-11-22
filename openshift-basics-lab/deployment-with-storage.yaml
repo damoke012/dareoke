@@ -1,0 +1,142 @@
+#############################################################################
+# DEPLOYMENT EXAMPLE - Runs Continuously
+#############################################################################
+#
+# WHAT IS A DEPLOYMENT?
+# - Keeps pods running 24/7
+# - Like a web server or API service
+# - Automatically restarts if pod crashes (self-healing)
+# - Can scale up/down (add more pods for load)
+# - Good for: web apps, APIs, microservices, databases
+#
+# KEY FEATURES:
+# - replicas: 2 (runs 2 copies for high availability)
+# - Self-healing: If pod dies, creates new one automatically
+# - Rolling updates: Can update code without downtime
+# - Load balancing: Traffic distributed across pods
+#
+#############################################################################
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-service
+  labels:
+    app: demo
+    type: deployment
+spec:
+  # Number of pod copies to run (high availability)
+  replicas: 2
+
+  # How to identify which pods belong to this deployment
+  selector:
+    matchLabels:
+      app: demo
+      type: deployment
+
+  # Pod template (what each pod looks like)
+  template:
+    metadata:
+      labels:
+        app: demo
+        type: deployment
+    spec:
+      # VOLUMES: Mount code from ConfigMap (like S3/cloud storage)
+      volumes:
+      - name: scripts
+        configMap:
+          name: demo-scripts
+          defaultMode: 0755
+
+      containers:
+      - name: web
+        # Use Python image to run our script
+        image: registry.access.redhat.com/ubi9/python-39:latest
+
+        # COMMAND: Run the Python script from mounted storage
+        command: ["python3"]
+        args: ["/scripts/web_server.py"]
+
+        # Mount the scripts volume
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+
+        # Resource limits
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+
+        # HEALTH CHECKS (tells Kubernetes if container is alive)
+        livenessProbe:
+          exec:
+            command:
+            - /bin/bash
+            - -c
+            - echo "healthy"
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3  # Restart after 3 failures
+
+        # READINESS CHECKS (tells Kubernetes if container is ready for traffic)
+        readinessProbe:
+          exec:
+            command:
+            - /bin/bash
+            - -c
+            - echo "ready"
+          initialDelaySeconds: 3
+          periodSeconds: 5
+
+        # Environment variables
+        env:
+        - name: SERVICE_TYPE
+          value: "web-server"
+        - name: LOG_LEVEL
+          value: "INFO"
+
+---
+#############################################################################
+# HOW TO USE THIS DEPLOYMENT
+#############################################################################
+#
+# 1. CREATE THE CONFIGMAP FIRST:
+#    oc apply -f configmap-scripts.yaml
+#
+# 2. CREATE THE DEPLOYMENT:
+#    oc apply -f deployment-with-storage.yaml
+#
+# 3. WATCH THE DEPLOYMENT:
+#    oc get deployments
+#    oc get pods
+#
+# 4. VIEW LOGS (see both pod logs):
+#    oc logs deployment/web-service --all-containers=true
+#    # Or view specific pod:
+#    oc logs <pod-name>
+#
+# 5. TEST SELF-HEALING:
+#    # Delete a pod - watch new one auto-create
+#    oc delete pod <pod-name>
+#    oc get pods -w
+#
+# 6. SCALE UP/DOWN:
+#    oc scale deployment web-service --replicas=3
+#    oc scale deployment web-service --replicas=1
+#
+# METRICS TO OBSERVE:
+# - Number of ready replicas vs desired replicas
+# - Pod restarts (increases if containers crash)
+# - Age (how long pods have been running)
+# - Resource usage across all replicas
+# - Liveness/Readiness probe success rate
+#
+# CLEANUP:
+#    oc delete deployment web-service
+#
+#############################################################################

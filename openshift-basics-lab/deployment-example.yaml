@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-service
+  labels:
+    app: demo
+    type: deployment
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: demo
+      type: deployment
+  template:
+    metadata:
+      labels:
+        app: demo
+        type: deployment
+    spec:
+      # Init container runs before the main container
+      initContainers:
+      - name: init-setup
+        image: registry.access.redhat.com/ubi8/ubi-minimal:latest
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          echo "=========================================="
+          echo "INIT CONTAINER: Preparing environment"
+          echo "=========================================="
+          echo "Start Time: $(date)"
+          echo ""
+          echo "Step 1: Checking dependencies..."
+          sleep 2
+          echo "✓ Dependencies verified"
+          echo ""
+          echo "Step 2: Creating configuration..."
+          echo "APP_VERSION=1.0.0" > /shared/config.env
+          echo "INIT_TIME=$(date)" >> /shared/config.env
+          echo "POD_NAME=$(hostname)" >> /shared/config.env
+          echo "✓ Configuration created"
+          echo ""
+          echo "Step 3: Initializing data..."
+          sleep 2
+          echo "✓ Data initialized"
+          echo ""
+          echo "=========================================="
+          echo "INIT CONTAINER COMPLETED"
+          echo "=========================================="
+        volumeMounts:
+        - name: shared-data
+          mountPath: /shared
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+
+      # Main container starts after init container completes
+      containers:
+      - name: web
+        image: registry.access.redhat.com/ubi8/ubi-minimal:latest
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          echo "=========================================="
+          echo "DEPLOYMENT: Web Service Started"
+          echo "=========================================="
+          echo "Pod: $(hostname)"
+          echo "Start Time: $(date)"
+          echo ""
+          echo "Loading configuration from init container..."
+          if [ -f /shared/config.env ]; then
+            cat /shared/config.env
+            echo ""
+            echo "✓ Configuration loaded successfully"
+          else
+            echo "✗ Configuration not found"
+          fi
+          echo ""
+          echo "Service is running and ready to handle requests..."
+          echo ""
+          # Keep the container running
+          while true; do
+            echo "[$(date)] Heartbeat - Pod $(hostname) is healthy"
+            echo "[$(date)] Active connections: $((RANDOM % 50 + 10))"
+            echo "[$(date)] Memory usage: $((RANDOM % 40 + 30))%"
+            echo "[$(date)] CPU usage: $((RANDOM % 60 + 20))%"
+            echo "---"
+            sleep 30
+          done
+        volumeMounts:
+        - name: shared-data
+          mountPath: /shared
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        livenessProbe:
+          exec:
+            command:
+            - /bin/bash
+            - -c
+            - echo "healthy"
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - /bin/bash
+            - -c
+            - echo "ready"
+          initialDelaySeconds: 3
+          periodSeconds: 5
+
+      volumes:
+      - name: shared-data
+        emptyDir: {}
