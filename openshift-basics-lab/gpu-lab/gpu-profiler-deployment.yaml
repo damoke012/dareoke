@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpu-profiler
+  labels:
+    app: gpu-profiler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gpu-profiler
+  template:
+    metadata:
+      labels:
+        app: gpu-profiler
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+    spec:
+      # Init container pulls code from Git
+      initContainers:
+      - name: git-clone
+        image: alpine/git:latest
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          git clone --depth 1 https://github.com/damoke012/dareoke.git /tmp/repo
+          cp -r /tmp/repo/openshift-basics-lab/gpu-lab/profiler/* /app/
+          chmod +x /app/*.py
+        volumeMounts:
+        - name: app-code
+          mountPath: /app
+      containers:
+      - name: gpu-profiler
+        image: pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+        command: ["python", "/app/profiler_service.py"]
+        ports:
+        - name: metrics
+          containerPort: 8000
+        volumeMounts:
+        - name: app-code
+          mountPath: /app
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+            memory: "8Gi"
+            cpu: "4"
+          requests:
+            nvidia.com/gpu: 1
+            memory: "4Gi"
+            cpu: "2"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        env:
+        - name: PROMETHEUS_PORT
+          value: "8000"
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      volumes:
+      - name: app-code
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gpu-profiler
+  labels:
+    app: gpu-profiler
+spec:
+  ports:
+  - name: metrics
+    port: 8000
+    targetPort: 8000
+  selector:
+    app: gpu-profiler

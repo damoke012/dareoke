@@ -10,10 +10,105 @@ The `gpu-test-job.yaml` is a Kubernetes Job that validates GPU availability and 
 
 ## How It Works
 
+### Architecture Overview
+
 1. **Kubelet creates an emptyDir volume** - Temporary storage on the node
 2. **Init container clones code from Git** - Downloads scripts to the emptyDir
 3. **Volume is mounted to main container** - Scripts available at `/scripts`
 4. **Main container runs the code** - Executes the GPU test
+
+### Why Use This Pattern?
+
+- **Separation of concerns** - Code stored in Git, not embedded in YAML
+- **Version control** - Update scripts without modifying the Job YAML
+- **Clean YAML** - Job definition remains simple and readable
+- **Reusability** - Same init container pattern works for any code
+
+---
+
+## Prerequisites: Push Code to Git
+
+Before deploying the Job, the GPU test scripts must be in your Git repository.
+
+### Step 1: Create the Scripts
+
+The scripts are located at:
+- `openshift-basics-lab/gpu-lab/scripts/gpu_test.py` - Python GPU benchmark
+- `openshift-basics-lab/gpu-lab/scripts/run_test.sh` - Bash runner script
+
+### Step 2: Push to Git Repository
+
+```bash
+git add openshift-basics-lab/gpu-lab/scripts/
+git commit -m "Add GPU test scripts"
+git push
+```
+
+### Step 3: Verify Scripts Are Available
+
+The init container will clone from:
+```
+https://github.com/damoke012/dareoke.git
+```
+
+And copy scripts from:
+```
+openshift-basics-lab/gpu-lab/scripts/
+```
+
+---
+
+## Init Container Explained
+
+The init container is the key to this pattern. It runs **before** the main container and prepares the environment.
+
+### What the Init Container Does
+
+```yaml
+initContainers:
+- name: git-clone
+  image: alpine/git:latest
+  command: ["/bin/sh", "-c"]
+  args:
+  - |
+    git clone --depth 1 https://github.com/damoke012/dareoke.git /tmp/repo
+    cp /tmp/repo/openshift-basics-lab/gpu-lab/scripts/* /scripts/
+    chmod +x /scripts/*.sh
+  volumeMounts:
+  - name: scripts
+    mountPath: /scripts
+```
+
+1. **`git clone --depth 1`** - Shallow clone (only latest commit, faster)
+2. **`cp ... /scripts/`** - Copy scripts to the shared emptyDir volume
+3. **`chmod +x`** - Make shell scripts executable
+
+### How the Main Container Gets Access
+
+Both containers mount the same `emptyDir` volume:
+
+```yaml
+volumes:
+- name: scripts
+  emptyDir: {}
+```
+
+- **Init container** writes to `/scripts` (emptyDir)
+- **Main container** reads from `/scripts` (same emptyDir)
+- The volume persists for the pod's lifetime
+
+### Execution Flow
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│   Pod Created   │ --> │  Init Container │ --> │  Main Container │
+│                 │     │  (git-clone)    │     │   (gpu-test)    │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+                               │                        │
+                               v                        v
+                        Clone from Git           Run /scripts/run_test.sh
+                        Copy to /scripts         Execute gpu_test.py
+```
 
 ---
 

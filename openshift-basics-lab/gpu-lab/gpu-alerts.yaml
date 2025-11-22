@@ -1,0 +1,75 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: gpu-alerts
+  labels:
+    release: prometheus
+spec:
+  groups:
+  - name: gpu-alerts
+    rules:
+    # Alert: GPU utilization is high (>80% for 5 minutes)
+    - alert: GPUHighUtilization
+      expr: DCGM_FI_DEV_GPU_UTIL > 80
+      for: 5m
+      labels:
+        severity: warning
+        team: gpu-lab
+      annotations:
+        summary: "GPU {{ $labels.gpu }} high utilization"
+        description: "GPU {{ $labels.gpu }} on {{ $labels.Hostname }} has been above 80% utilization for 5 minutes. Current: {{ $value }}%"
+
+    # Alert: GPU memory is almost full (>90%)
+    - alert: GPUMemoryHigh
+      expr: (DCGM_FI_DEV_FB_USED / (DCGM_FI_DEV_FB_FREE + DCGM_FI_DEV_FB_USED)) * 100 > 90
+      for: 2m
+      labels:
+        severity: critical
+        team: gpu-lab
+      annotations:
+        summary: "GPU {{ $labels.gpu }} memory critical"
+        description: "GPU {{ $labels.gpu }} memory usage is above 90%. Current: {{ $value | printf \"%.1f\" }}%"
+
+    # Alert: GPU temperature is high (>80°C)
+    - alert: GPUTemperatureHigh
+      expr: DCGM_FI_DEV_GPU_TEMP > 80
+      for: 3m
+      labels:
+        severity: warning
+        team: gpu-lab
+      annotations:
+        summary: "GPU {{ $labels.gpu }} temperature high"
+        description: "GPU {{ $labels.gpu }} temperature is {{ $value }}°C, above 80°C threshold"
+
+    # Alert: GPU temperature critical (>90°C)
+    - alert: GPUTemperatureCritical
+      expr: DCGM_FI_DEV_GPU_TEMP > 90
+      for: 1m
+      labels:
+        severity: critical
+        team: gpu-lab
+      annotations:
+        summary: "GPU {{ $labels.gpu }} temperature critical"
+        description: "GPU {{ $labels.gpu }} temperature is {{ $value }}°C - immediate action required!"
+
+    # Alert: GPU power usage high (>300W)
+    - alert: GPUPowerHigh
+      expr: DCGM_FI_DEV_POWER_USAGE > 300
+      for: 5m
+      labels:
+        severity: warning
+        team: gpu-lab
+      annotations:
+        summary: "GPU {{ $labels.gpu }} power usage high"
+        description: "GPU {{ $labels.gpu }} power consumption is {{ $value }}W"
+
+    # Alert: No GPUs detected (for testing - fires when GPU util is 0)
+    - alert: GPUIdleTest
+      expr: DCGM_FI_DEV_GPU_UTIL == 0
+      for: 1m
+      labels:
+        severity: info
+        team: gpu-lab
+      annotations:
+        summary: "GPU {{ $labels.gpu }} is idle"
+        description: "GPU {{ $labels.gpu }} has 0% utilization - this alert fires for testing Google Chat integration"
