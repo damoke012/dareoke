@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: health-check
+  labels:
+    app: health-check
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: health-check
+  template:
+    metadata:
+      labels:
+        app: health-check
+    spec:
+      containers:
+      - name: health-check
+        image: nginx:alpine
+        ports:
+        - name: http
+          containerPort: 80
+        resources:
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: health-check
+  labels:
+    app: health-check
+spec:
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+  selector:
+    app: health-check

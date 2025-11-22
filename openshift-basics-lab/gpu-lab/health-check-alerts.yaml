@@ -1,0 +1,49 @@
+# Health Check Alerts for Grafana
+# Import these manually in Grafana UI (Alerting → Alert rules → New alert rule)
+# Since PrometheusRule CRD requires cluster-admin permissions
+
+# Alert 1: Pod Count Test Alert (will fire when health-check pods exist)
+# ---
+# Name: HealthCheckPodsRunning
+# Query: count(kube_pod_info{namespace="basic-lab", pod=~"health-check.*"}) > 0
+# Condition: IS ABOVE 0
+# For: 1m
+# Labels: severity=info, team=gpu-lab
+# Summary: Health Check pods are running in basic-lab
+# Description: This test alert fires when health-check pods are running. Pod count: {{ $value }}
+
+# Alert 2: High Memory Usage
+# ---
+# Name: HealthCheckHighMemory
+# Query: container_memory_usage_bytes{namespace="basic-lab", pod=~"health-check.*", container!=""} > 100000000
+# Condition: IS ABOVE 100000000 (100MB)
+# For: 2m
+# Labels: severity=warning, team=gpu-lab
+# Summary: Health Check pod high memory usage
+# Description: Container {{ $labels.container }} in pod {{ $labels.pod }} is using {{ $value | humanize }} memory
+
+# Alert 3: Container Restarts
+# ---
+# Name: HealthCheckRestarts
+# Query: increase(kube_pod_container_status_restarts_total{namespace="basic-lab", pod=~"health-check.*"}[5m]) > 0
+# Condition: IS ABOVE 0
+# For: 1m
+# Labels: severity=warning, team=gpu-lab
+# Summary: Health Check container restarted
+# Description: Container {{ $labels.container }} in pod {{ $labels.pod }} has restarted
+
+# ============================================
+# Quick Setup in Grafana:
+# ============================================
+#
+# 1. Go to Alerting → Alert rules → New alert rule
+# 2. Select "Grafana managed alert"
+# 3. Use the queries above
+# 4. Set evaluation interval to 1m
+# 5. Add labels and annotations
+# 6. Save
+#
+# To test Google Chat:
+# - Use Alert 1 (HealthCheckPodsRunning) - fires when pods exist
+# - Make sure Google Chat contact point is configured
+# - Set notification policy to route to Google Chat
