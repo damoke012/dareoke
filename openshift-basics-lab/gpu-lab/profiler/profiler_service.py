@@ -78,17 +78,21 @@ class MetricsHandler(BaseHTTPRequestHandler):
         pass
 
 def main():
-    print(f"Starting GPU Profiler Service on port {PORT}")
-    print(f"PyTorch version: {torch.__version__}")
-    print(f"CUDA available: {torch.cuda.is_available()}")
+    import sys
+    # Force unbuffered output for logs
+    sys.stdout = sys.stderr
+
+    print(f"Starting GPU Profiler Service on port {PORT}", flush=True)
+    print(f"PyTorch version: {torch.__version__}", flush=True)
+    print(f"CUDA available: {torch.cuda.is_available()}", flush=True)
     if torch.cuda.is_available():
-        print(f"GPU count: {torch.cuda.device_count()}")
+        print(f"GPU count: {torch.cuda.device_count()}", flush=True)
         for i in range(torch.cuda.device_count()):
-            print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+            print(f"  GPU {i}: {torch.cuda.get_device_name(i)}", flush=True)
 
     server = HTTPServer(('0.0.0.0', PORT), MetricsHandler)
-    print(f"Metrics available at http://localhost:{PORT}/metrics")
-    print(f"Health check at http://localhost:{PORT}/health")
+    print(f"Metrics available at http://localhost:{PORT}/metrics", flush=True)
+    print(f"Health check at http://localhost:{PORT}/health", flush=True)
     server.serve_forever()
 
 if __name__ == '__main__':
