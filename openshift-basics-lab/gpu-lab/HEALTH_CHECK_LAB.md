@@ -159,14 +159,14 @@ Since PrometheusRule CRD requires cluster-admin permissions, create alerts direc
 | Summary | Health Check pods are running in basic-lab |
 | Description | This test alert fires when health-check pods are running. Pod count: {{ $value }} |
 
-**Alert 2: High Memory Usage**
+**Alert 2: High Memory Usage** (fires immediately - low threshold)
 
 | Field | Value |
 |-------|-------|
 | Name | HealthCheckHighMemory |
-| Query | `container_memory_usage_bytes{namespace="basic-lab", pod=~"health-check.*", container!=""} > 100000000` |
-| Condition | IS ABOVE 100000000 (100MB) |
-| For | 2m |
+| Query | `container_memory_usage_bytes{namespace="basic-lab", pod=~"health-check.*", container!=""} > 1000000` |
+| Condition | IS ABOVE 1000000 (1MB) |
+| For | 1m |
 | Labels | severity=warning, team=gpu-lab |
 | Summary | Health Check pod high memory usage |
 | Description | Container {{ $labels.container }} in pod {{ $labels.pod }} is using high memory |
