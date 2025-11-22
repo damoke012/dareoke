@@ -320,18 +320,55 @@ gpu_power_watts{gpu="0"} 125.50
 
 This lets you create Grafana dashboards and alerts based on real-time GPU metrics from your workloads.
 
+### Why We Need a Service
+
+The Deployment creates pods that expose metrics on port 8000, but pods have dynamic IPs that change when they restart. The **Service** provides:
+- A stable DNS name (`gpu-profiler`) and IP address
+- Load balancing across pod replicas
+- Service discovery for Prometheus to scrape metrics
+
+Without the Service, Prometheus wouldn't know how to find the metrics endpoint.
+
 ### How to Deploy
 
-1. **Workloads → Deployments**
-2. Click **Create Deployment**
-3. Delete the YAML and paste the manifest above
-4. Click **Create**
+**Note:** The YAML contains two resources (Deployment + Service). Use **Import YAML** to deploy both at once.
+
+1. Click the **+** button in top navigation (Import YAML)
+2. Paste the complete YAML above
+3. Click **Create**
+
+**Alternative - Deploy Separately:**
+
+**Step 1: Create Deployment**
+1. **Workloads → Deployments → Create Deployment**
+2. Paste only the Deployment section (before the `---`)
+3. Click **Create**
+
+**Step 2: Create Service**
+1. **Networking → Services → Create Service**
+2. Paste the Service section:
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: gpu-profiler
+  labels:
+    app: gpu-profiler
+spec:
+  ports:
+  - name: metrics
+    port: 8000
+    targetPort: 8000
+  selector:
+    app: gpu-profiler
+```
+3. Click **Create**
 
 ### Verify Deployment
 
-1. **Workloads → Deployments** → `gpu-profiler`
-2. Check **Pods** tab - should show 1/1 Running
-3. View **Logs** for profiler output
+1. **Workloads → Deployments** → `gpu-profiler` - should show 1/1 Running
+2. **Networking → Services** → `gpu-profiler` - should show port 8000
+3. View pod **Logs** for profiler output
 
 ---
 
