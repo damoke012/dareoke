@@ -23,6 +23,9 @@ RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2
     ./aws/install && \
     rm -rf awscliv2.zip aws
 
+# Fix NumPy compatibility issue (PyTorch container uses NumPy 2.x but OpenCV needs 1.x)
+RUN pip install --no-cache-dir 'numpy<2.0'
+
 # Install CV-specific packages
 RUN pip install --no-cache-dir \
     opencv-python \
