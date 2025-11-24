@@ -3,10 +3,10 @@ FROM image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/py
 
 USER root
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install system dependencies (UBI uses dnf, not apt)
+RUN dnf install -y --nodocs \
     curl unzip \
-    && rm -rf /var/lib/apt/lists/*
+    && dnf clean all
 
 # Install AWS CLI
 RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
