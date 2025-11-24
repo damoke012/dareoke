@@ -1,0 +1,43 @@
+FROM image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/jupyter-pytorch-ngc-custom:latest
+
+USER root
+
+# Install system dependencies for Poetry and project builds
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Poetry (recommended install script)
+RUN curl -sSL https://install.python-poetry.org | python3 -
+
+# Add Poetry to PATH
+ENV PATH="/opt/app-root/src/.local/bin:/root/.local/bin:$PATH"
+
+# Set workdir
+WORKDIR /app
+
+# Copy only dependency files first (better caching)
+COPY agentic-lab-pyproject.toml ./pyproject.toml
+COPY agentic-lab-poetry.lock ./poetry.lock
+
+# Install dependencies (NO virtualenv inside container)
+# Regenerate lock file to match pyproject.toml, then install
+RUN poetry config virtualenvs.create false \
+    && poetry lock \
+    && poetry install --no-interaction --no-ansi --no-root
+
+# Reinstall torchvision to match PyTorch 2.9.1 (fixes compatibility issue)
+RUN pip install --no-cache-dir torchvision==0.24.1+cu128 --index-url https://download.pytorch.org/whl/cu128
+
+# Fix permissions for Jupyter and cache directories (fixes RHOAI dashboard visibility)
+RUN mkdir -p /opt/app-root/src/.local/share/jupyter/runtime \
+    && mkdir -p /opt/app-root/src/.cache/huggingface \
+    && chown -R 1001:0 /opt/app-root/src/.local \
+    && chown -R 1001:0 /opt/app-root/src/.cache \
+    && chmod -R g+rwX /opt/app-root/src/.local \
+    && chmod -R g+rwX /opt/app-root/src/.cache
+
+# Switch back to default notebook user
+USER 1001
+
+WORKDIR /opt/app-root/src

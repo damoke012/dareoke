@@ -1,0 +1,40 @@
+FROM image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/jupyter-pytorch-ngc-custom:latest
+
+USER root
+
+# Install system dependencies for Poetry and project builds
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Poetry (recommended install script)
+RUN curl -sSL https://install.python-poetry.org | python3 -
+
+# Add Poetry to PATH
+ENV PATH="/opt/app-root/src/.local/bin:/root/.local/bin:$PATH"
+
+# Set workdir
+WORKDIR /app
+
+# Copy only dependency files first (better caching)
+COPY rag-lab-pyproject.toml ./pyproject.toml
+COPY rag-lab-poetry.lock ./poetry.lock
+
+# Install dependencies (NO virtualenv inside container)
+# Note: poetry lock regenerates since pyproject.toml was updated with torch versions
+RUN poetry config virtualenvs.create false \
+    && poetry lock \
+    && poetry install --no-interaction --no-ansi --no-root
+
+# Fix permissions for Jupyter and cache directories
+RUN mkdir -p /opt/app-root/src/.local/share/jupyter/runtime \
+    && mkdir -p /opt/app-root/src/.cache/huggingface \
+    && chown -R 1001:0 /opt/app-root/src/.local \
+    && chown -R 1001:0 /opt/app-root/src/.cache \
+    && chmod -R g+rwX /opt/app-root/src/.local \
+    && chmod -R g+rwX /opt/app-root/src/.cache
+
+# Switch back to default notebook user
+USER 1001
+
+WORKDIR /opt/app-root/src
