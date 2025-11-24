@@ -1,5 +1,5 @@
-# Build on top of kia-pytorch to add Jupyter
-FROM image-registry.openshift-image-registry.svc:5000/hpc-workshopv1/kia-pytorch:latest
+# CV Lab Custom Image - Based on RHOAI PyTorch notebook
+FROM image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/pytorch:2024.1
 
 USER root
 
@@ -14,32 +14,21 @@ RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2
     ./aws/install && \
     rm -rf awscliv2.zip aws
 
-# Install Jupyter
+# Install CV-specific packages
 RUN pip install --no-cache-dir \
-    jupyterlab \
-    notebook \
-    ipykernel \
-    ipywidgets
+    opencv-python-headless \
+    albumentations \
+    ultralytics \
+    supervision
 
-# Create working directory and jupyter directories
-RUN mkdir -p /home/jovyan && \
-    mkdir -p /home/jovyan/.local/share/jupyter/runtime && \
-    mkdir -p /home/jovyan/.jupyter && \
-    chown -R 1000:0 /home/jovyan && \
-    chmod -R g+rwX /home/jovyan
+# Fix permissions for Jupyter directories
+RUN mkdir -p /opt/app-root/src/.local/share/jupyter/runtime \
+    && mkdir -p /opt/app-root/src/.cache/huggingface \
+    && chown -R 1001:0 /opt/app-root/src/.local \
+    && chown -R 1001:0 /opt/app-root/src/.cache \
+    && chmod -R g+rwX /opt/app-root/src/.local \
+    && chmod -R g+rwX /opt/app-root/src/.cache
 
-# Set environment variables for Jupyter
-ENV HOME=/home/jovyan
-ENV JUPYTER_CONFIG_DIR=/home/jovyan/.jupyter
-ENV JUPYTER_DATA_DIR=/home/jovyan/.local/share/jupyter
-ENV JUPYTER_RUNTIME_DIR=/home/jovyan/.local/share/jupyter/runtime
+USER 1001
 
-USER 1000
-
-WORKDIR /home/jovyan
-
-# Expose Jupyter port
-EXPOSE 8888
-
-# Start JupyterLab
-CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root", "--NotebookApp.token=''", "--NotebookApp.password=''"]
+WORKDIR /opt/app-root/src
