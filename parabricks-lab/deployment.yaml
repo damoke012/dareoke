@@ -1,0 +1,122 @@
+# Ansuya Jupyter Deployment with Docker-in-Docker and PVC
+# For hpc-workshopv1 namespace
+# Requires privileged SCC: oc adm policy add-scc-to-user privileged -z ansuya-jupyter-dind -n hpc-workshopv1
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ansuya-jupyter-dind
+  namespace: hpc-workshopv1
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ansuya-jupyter-dind-data
+  namespace: hpc-workshopv1
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ansuya-jupyter-dind
+  namespace: hpc-workshopv1
+  labels:
+    app: ansuya-jupyter-dind
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ansuya-jupyter-dind
+  template:
+    metadata:
+      labels:
+        app: ansuya-jupyter-dind
+    spec:
+      serviceAccountName: ansuya-jupyter-dind
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: jupyter
+        image: image-registry.openshift-image-registry.svc:5000/hpc-workshopv1/parabricks-jupyter-dind:latest
+        imagePullPolicy: Always
+        securityContext:
+          privileged: true
+        command: ["/bin/bash", "-c", "/opt/app-root/bin/start-dind-notebook.sh"]
+        ports:
+        - containerPort: 8888
+          name: jupyter
+        env:
+        - name: JUPYTER_ENABLE_LAB
+          value: "yes"
+        - name: LD_LIBRARY_PATH
+          value: "/opt/conda/lib:/opt/parabricks/binaries/lib:/usr/lib64"
+        - name: DOCKER_HOST
+          value: "unix:///var/run/docker.sock"
+        resources:
+          requests:
+            nvidia.com/gpu: "2"
+            memory: "48Gi"
+            cpu: "2"
+          limits:
+            nvidia.com/gpu: "2"
+            memory: "64Gi"
+            cpu: "4"
+        volumeMounts:
+        - name: data
+          mountPath: /opt/app-root/src
+        - name: docker-graph
+          mountPath: /var/lib/docker
+        readinessProbe:
+          httpGet:
+            path: /api
+            port: 8888
+          initialDelaySeconds: 30
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /api
+            port: 8888
+          initialDelaySeconds: 60
+          periodSeconds: 10
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: ansuya-jupyter-dind-data
+      - name: docker-graph
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ansuya-jupyter-dind
+  namespace: hpc-workshopv1
+spec:
+  selector:
+    app: ansuya-jupyter-dind
+  ports:
+  - port: 8888
+    targetPort: 8888
+    name: jupyter
+  type: ClusterIP
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: ansuya-jupyter-dind
+  namespace: hpc-workshopv1
+spec:
+  to:
+    kind: Service
+    name: ansuya-jupyter-dind
+  port:
+    targetPort: jupyter
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

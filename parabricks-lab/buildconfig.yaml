@@ -1,0 +1,182 @@
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: parabricks-jupyter-dind
+  namespace: hpc-workshopv1
+spec:
+  lookupPolicy:
+    local: true
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: parabricks-jupyter-dind
+  namespace: hpc-workshopv1
+spec:
+  output:
+    to:
+      kind: ImageStreamTag
+      name: parabricks-jupyter-dind:latest
+  source:
+    type: Dockerfile
+    dockerfile: |
+      # Parabricks Jupyter Workbench with Docker-in-Docker and all genomics tools
+      FROM nvcr.io/nvidia/clara/clara-parabricks:4.6.0-1 AS parabricks-source
+
+      FROM image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/jupyter-datascience-cpu-py312-ubi9:2025.1
+
+      LABEL maintainer="platform-team" \
+            name="parabricks-workbench-dind" \
+            version="2.0.0" \
+            description="Parabricks workbench with Docker-in-Docker, Bakta, Conda, and all genomics tools"
+
+      USER 0
+
+      # Install build dependencies
+      RUN dnf install -y --setopt=tsflags=nodocs \
+          wget bzip2 gcc gcc-c++ make zlib-devel bzip2-devel xz-devel ncurses-devel \
+          iptables procps-ng \
+          && dnf clean all
+
+      # Install Docker
+      RUN dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo && \
+          dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin && \
+          dnf clean all
+
+      # Install NVIDIA Container Toolkit for GPU passthrough to Docker containers
+      RUN curl -s -L https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo | \
+          tee /etc/yum.repos.d/nvidia-container-toolkit.repo && \
+          dnf install -y nvidia-container-toolkit && \
+          nvidia-ctk runtime configure --runtime=docker && \
+          dnf clean all
+
+      # Install samtools
+      RUN cd /tmp && \
+          wget https://github.com/samtools/samtools/releases/download/1.19.2/samtools-1.19.2.tar.bz2 && \
+          tar -xjf samtools-1.19.2.tar.bz2 && \
+          cd samtools-1.19.2 && \
+          ./configure --prefix=/usr/local && make && make install && \
+          cd /tmp && rm -rf samtools-1.19.2*
+
+      # Install htslib (includes tabix)
+      RUN cd /tmp && \
+          wget https://github.com/samtools/htslib/releases/download/1.19.1/htslib-1.19.1.tar.bz2 && \
+          tar -xjf htslib-1.19.1.tar.bz2 && \
+          cd htslib-1.19.1 && \
+          ./configure --prefix=/usr/local && make && make install && \
+          cd /tmp && rm -rf htslib-1.19.1*
+
+      # Install bcftools
+      RUN cd /tmp && \
+          wget https://github.com/samtools/bcftools/releases/download/1.19/bcftools-1.19.tar.bz2 && \
+          tar -xjf bcftools-1.19.tar.bz2 && \
+          cd bcftools-1.19 && \
+          ./configure --prefix=/usr/local && make && make install && \
+          cd /tmp && rm -rf bcftools-1.19*
+
+      # Install bwa
+      RUN cd /tmp && \
+          wget https://github.com/lh3/bwa/releases/download/v0.7.17/bwa-0.7.17.tar.bz2 && \
+          tar -xjf bwa-0.7.17.tar.bz2 && \
+          cd bwa-0.7.17 && \
+          sed -i 's/const uint8_t rle_auxtab\[8\];/extern const uint8_t rle_auxtab[8];/' rle.h && \
+          make && cp bwa /usr/local/bin/ && \
+          cd /tmp && rm -rf bwa-0.7.17*
+
+      # Install SRA Toolkit
+      RUN cd /tmp && \
+          wget https://ftp-trace.ncbi.nlm.nih.gov/sra/sdk/3.2.0/sratoolkit.3.2.0-centos_linux64.tar.gz && \
+          tar -xzf sratoolkit.3.2.0-centos_linux64.tar.gz && \
+          cp -r sratoolkit.3.2.0-centos_linux64/bin/* /usr/local/bin/ && \
+          rm -rf sratoolkit.3.2.0-centos_linux64*
+
+      # Install EDirect
+      RUN cd /tmp && \
+          dnf install -y perl perl-App-cpanminus perl-LWP-Protocol-https && \
+          wget https://ftp.ncbi.nlm.nih.gov/entrez/entrezdirect/edirect.tar.gz && \
+          tar -xzf edirect.tar.gz && \
+          mkdir -p /usr/local/edirect && \
+          cp -r edirect/* /usr/local/edirect/ && \
+          rm -rf edirect* && \
+          dnf clean all
+
+      # Install GATK
+      RUN cd /tmp && \
+          wget https://github.com/broadinstitute/gatk/releases/download/4.6.1.0/gatk-4.6.1.0.zip && \
+          dnf install -y unzip java-17-openjdk && \
+          unzip gatk-4.6.1.0.zip && \
+          mv gatk-4.6.1.0 /usr/local/gatk && \
+          ln -s /usr/local/gatk/gatk /usr/local/bin/gatk && \
+          rm -rf gatk-4.6.1.0.zip && \
+          dnf clean all
+
+      # Install Miniforge (conda without TOS issues)
+      RUN cd /tmp && \
+          wget https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh && \
+          bash Miniforge3-Linux-x86_64.sh -b -p /opt/conda && \
+          rm Miniforge3-Linux-x86_64.sh
+
+      # Install gperftools first (smaller package)
+      RUN /opt/conda/bin/mamba install -y -c conda-forge gperftools && \
+          /opt/conda/bin/mamba clean -afy
+
+      # Install Prokka (medium size, many dependencies)
+      RUN /opt/conda/bin/mamba install -y -c conda-forge -c bioconda prokka && \
+          /opt/conda/bin/mamba clean -afy
+
+      # Install Bakta (large package)
+      RUN /opt/conda/bin/mamba install -y -c conda-forge -c bioconda bakta && \
+          /opt/conda/bin/mamba clean -afy
+
+      # Copy Parabricks from source image
+      COPY --from=parabricks-source /usr/local/parabricks /opt/parabricks
+      COPY --from=parabricks-source /usr/lib/x86_64-linux-gnu/libboost_*.so.1.74.0 /usr/lib64/
+
+      # Setup boost library symlinks
+      RUN cd /usr/lib64 && \
+          for lib in libboost_*.so.1.74.0; do \
+              ln -sf "$lib" "${lib%.1.74.0}"; \
+          done && \
+          ldconfig
+
+      # Set environment variables
+      ENV PATH="/opt/conda/bin:/opt/parabricks:/usr/local/edirect:${PATH}" \
+          LD_LIBRARY_PATH="/opt/conda/lib:/opt/parabricks/binaries/lib:/usr/lib64:${LD_LIBRARY_PATH}" \
+          DOCKER_HOST="unix:///var/run/docker.sock"
+
+      # Install Python packages
+      RUN pip install --no-cache-dir biopython==1.86 pysam==0.23.3 pandas numpy matplotlib seaborn
+
+      # Setup directories and permissions
+      RUN mkdir -p /opt/app-root/src/notebooks /var/lib/docker && \
+          chown -R 1001:0 /opt/app-root/src /opt/parabricks /opt/conda && \
+          chmod -R g+w /opt/app-root/src /opt/conda && \
+          chmod -R g+rx /opt/parabricks
+
+      # Create startup script that starts Docker daemon and Jupyter
+      RUN echo '#!/bin/bash' > /opt/app-root/bin/start-dind-notebook.sh && \
+          echo 'dockerd &' >> /opt/app-root/bin/start-dind-notebook.sh && \
+          echo 'timeout 30 sh -c "until docker info >/dev/null 2>&1; do sleep 1; done"' >> /opt/app-root/bin/start-dind-notebook.sh && \
+          echo 'echo "Docker daemon started"' >> /opt/app-root/bin/start-dind-notebook.sh && \
+          echo 'exec jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --ServerApp.token="" --ServerApp.password="" --ServerApp.allow_origin="*"' >> /opt/app-root/bin/start-dind-notebook.sh && \
+          chmod +x /opt/app-root/bin/start-dind-notebook.sh
+
+      USER 0
+      WORKDIR /opt/app-root/src
+
+      ENTRYPOINT ["/bin/bash", "-c"]
+      CMD ["/opt/app-root/bin/start-dind-notebook.sh"]
+  strategy:
+    type: Docker
+    dockerStrategy:
+      from:
+        kind: DockerImage
+        name: image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/jupyter-datascience-cpu-py312-ubi9:2025.1
+  resources:
+    limits:
+      memory: 16Gi
+      cpu: 4
+    requests:
+      memory: 8Gi
+      cpu: 2
