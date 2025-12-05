@@ -1,0 +1,129 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: triton-inference-server
+  namespace: forge-inference
+  labels:
+    app: triton
+    app.kubernetes.io/name: triton-inference-server
+    app.kubernetes.io/part-of: forge-cognition
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: triton
+  template:
+    metadata:
+      labels:
+        app: triton
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8002"
+        prometheus.io/path: "/metrics"
+    spec:
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      containers:
+      - name: triton
+        image: nvcr.io/nvidia/tritonserver:24.01-trtllm-python-py3
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        - containerPort: 8001
+          name: grpc
+          protocol: TCP
+        - containerPort: 8002
+          name: metrics
+          protocol: TCP
+        env:
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: "all"
+        - name: CUDA_VISIBLE_DEVICES
+          value: "0"
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+            memory: "32Gi"
+            cpu: "8"
+          requests:
+            memory: "16Gi"
+            cpu: "4"
+        volumeMounts:
+        - name: model-repository
+          mountPath: /models
+        - name: shm
+          mountPath: /dev/shm
+        command: ["tritonserver"]
+        args:
+        - "--model-repository=/models"
+        - "--allow-http=true"
+        - "--allow-grpc=true"
+        - "--allow-metrics=true"
+        - "--log-verbose=1"
+        livenessProbe:
+          httpGet:
+            path: /v2/health/live
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /v2/health/ready
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          failureThreshold: 3
+      volumes:
+      - name: model-repository
+        persistentVolumeClaim:
+          claimName: model-repository
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Gi
+      securityContext:
+        runAsNonRoot: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: triton-inference-server
+  namespace: forge-inference
+  labels:
+    app: triton
+    app.kubernetes.io/name: triton-inference-server
+    app.kubernetes.io/part-of: forge-cognition
+spec:
+  selector:
+    app: triton
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+    protocol: TCP
+  - name: grpc
+    port: 8001
+    targetPort: 8001
+    protocol: TCP
+  - name: metrics
+    port: 8002
+    targetPort: 8002
+    protocol: TCP
+  type: ClusterIP
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: triton-http
+  namespace: forge-inference
+spec:
+  to:
+    kind: Service
+    name: triton-inference-server
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

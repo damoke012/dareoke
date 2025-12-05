@@ -1,0 +1,194 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trtllm-model-build
+  namespace: forge-inference
+  labels:
+    app.kubernetes.io/name: trtllm-model-build
+    app.kubernetes.io/part-of: forge-cognition
+spec:
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        job: trtllm-model-build
+    spec:
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      restartPolicy: Never
+      containers:
+      - name: builder
+        image: nvcr.io/nvidia/tritonserver:24.01-trtllm-python-py3
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          set -ex
+
+          echo "=========================================="
+          echo "TensorRT-LLM Model Build Job"
+          echo "=========================================="
+          echo "Start time: $(date)"
+
+          # Install dependencies
+          echo "=== Installing dependencies ==="
+          pip install --quiet huggingface_hub transformers sentencepiece
+
+          # Download model
+          echo "=== Downloading TinyLlama 1.1B ==="
+          python3 << 'PYEOF'
+          from huggingface_hub import snapshot_download
+          import os
+
+          model_dir = "/models/tinyllama-hf"
+          if not os.path.exists(model_dir):
+              snapshot_download(
+                  repo_id="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+                  local_dir=model_dir,
+                  ignore_patterns=["*.bin", "*.h5", "*.ot"]
+              )
+              print(f"Model downloaded to {model_dir}")
+          else:
+              print(f"Model already exists at {model_dir}")
+          PYEOF
+
+          # Check available disk space
+          echo "=== Disk space ==="
+          df -h /models
+
+          # Check GPU
+          echo "=== GPU Info ==="
+          nvidia-smi
+
+          # Convert checkpoint
+          echo "=== Converting to TensorRT-LLM checkpoint ==="
+          cd /opt/tritonserver/tensorrtllm_backend/tensorrt_llm/examples/llama
+
+          if [ ! -d "/models/tinyllama-ckpt" ]; then
+              python3 convert_checkpoint.py \
+                  --model_dir /models/tinyllama-hf \
+                  --output_dir /models/tinyllama-ckpt \
+                  --dtype float16
+          else
+              echo "Checkpoint already exists"
+          fi
+
+          # Build TensorRT engine
+          echo "=== Building TensorRT-LLM Engine (FP16) ==="
+          if [ ! -d "/models/tinyllama-engine-fp16" ]; then
+              trtllm-build \
+                  --checkpoint_dir /models/tinyllama-ckpt \
+                  --output_dir /models/tinyllama-engine-fp16 \
+                  --gemm_plugin float16 \
+                  --gpt_attention_plugin float16 \
+                  --max_batch_size 8 \
+                  --max_input_len 2048 \
+                  --max_output_len 512 \
+                  --max_beam_width 1
+          else
+              echo "FP16 engine already exists"
+          fi
+
+          # Create Triton model repository structure
+          echo "=== Setting up Triton model repository ==="
+          mkdir -p /models/tensorrt_llm/1
+          cp -r /models/tinyllama-engine-fp16/* /models/tensorrt_llm/1/ 2>/dev/null || true
+
+          # Create config.pbtxt
+          cat > /models/tensorrt_llm/config.pbtxt << 'CONFIGEOF'
+          name: "tensorrt_llm"
+          backend: "tensorrtllm"
+          max_batch_size: 8
+
+          model_transaction_policy {
+            decoupled: true
+          }
+
+          dynamic_batching {
+            preferred_batch_size: [ 1, 2, 4, 8 ]
+            max_queue_delay_microseconds: 100
+          }
+
+          input [
+            {
+              name: "input_ids"
+              data_type: TYPE_INT32
+              dims: [ -1 ]
+            },
+            {
+              name: "input_lengths"
+              data_type: TYPE_INT32
+              dims: [ 1 ]
+              reshape: { shape: [ ] }
+            },
+            {
+              name: "request_output_len"
+              data_type: TYPE_INT32
+              dims: [ 1 ]
+            },
+            {
+              name: "end_id"
+              data_type: TYPE_INT32
+              dims: [ 1 ]
+              optional: true
+            },
+            {
+              name: "pad_id"
+              data_type: TYPE_INT32
+              dims: [ 1 ]
+              optional: true
+            }
+          ]
+
+          output [
+            {
+              name: "output_ids"
+              data_type: TYPE_INT32
+              dims: [ -1, -1 ]
+            },
+            {
+              name: "sequence_length"
+              data_type: TYPE_INT32
+              dims: [ -1 ]
+            }
+          ]
+
+          instance_group [
+            {
+              count: 1
+              kind: KIND_GPU
+              gpus: [ 0 ]
+            }
+          ]
+          CONFIGEOF
+
+          echo "=== Model repository contents ==="
+          ls -la /models/
+          ls -la /models/tensorrt_llm/ 2>/dev/null || echo "tensorrt_llm dir not found"
+          ls -la /models/tensorrt_llm/1/ 2>/dev/null || echo "tensorrt_llm/1 dir not found"
+
+          echo "=========================================="
+          echo "Build Complete!"
+          echo "End time: $(date)"
+          echo "=========================================="
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+            memory: "32Gi"
+            cpu: "8"
+          requests:
+            memory: "24Gi"
+            cpu: "4"
+        volumeMounts:
+        - name: model-repository
+          mountPath: /models
+        - name: shm
+          mountPath: /dev/shm
+      volumes:
+      - name: model-repository
+        persistentVolumeClaim:
+          claimName: model-repository
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Gi
