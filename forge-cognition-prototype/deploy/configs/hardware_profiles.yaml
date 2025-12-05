@@ -1,0 +1,87 @@
+# Forge Cognition Hardware Profiles
+# ==================================
+# Configuration-driven optimization profiles for both hardware SKUs.
+# These profiles are loaded at runtime to adapt deployment to the target hardware.
+
+profiles:
+  # Jetson AGX Thor - Embedded AI platform
+  jetson-thor:
+    arch: aarch64
+    gpu_name: "NVIDIA Jetson AGX Thor"
+    gpu_memory: 64  # GB - Unified memory
+    nvlink: true
+    power_mode: "MAXN"  # Options: 10W, 15W, 30W, 50W, MAXN
+    tensorrt_precision: fp16
+    max_batch_size: 16
+    max_input_len: 4096
+    max_output_len: 1024
+    kv_cache_fraction: 0.4
+    extra_config:
+      use_paged_kv_cache: true
+      enable_chunked_context: true
+      # Thor-specific optimizations
+      enable_multi_block_mode: true
+      unified_memory_optimization: true
+
+  # RTX Pro 4000 - Workstation/Server GPU
+  rtx-pro-4000:
+    arch: x86_64
+    gpu_name: "NVIDIA RTX Pro 4000"
+    gpu_memory: 20  # GB - Discrete VRAM
+    nvlink: false
+    tensorrt_precision: fp16
+    max_batch_size: 8
+    max_input_len: 2048
+    max_output_len: 512
+    kv_cache_fraction: 0.3
+    extra_config:
+      use_paged_kv_cache: true
+
+  # Development profile (Tesla P40, consumer GPUs, etc.)
+  development:
+    arch: x86_64
+    gpu_name: "Development GPU"
+    gpu_memory: 24  # GB
+    nvlink: false
+    tensorrt_precision: fp16
+    max_batch_size: 8
+    max_input_len: 2048
+    max_output_len: 512
+    kv_cache_fraction: 0.3
+    extra_config:
+      use_paged_kv_cache: true
+
+# Model-specific overrides
+models:
+  maintenance-assist:
+    description: "Maintenance Assistant SLM"
+    # Overrides per hardware
+    overrides:
+      jetson-thor:
+        max_batch_size: 8  # Lower for this specific model
+      rtx-pro-4000:
+        max_batch_size: 4
+
+  asset-engineering:
+    description: "AI Assisted Asset Engineering with conversational assistance"
+    # Longer context needed for conversations
+    overrides:
+      jetson-thor:
+        max_input_len: 8192
+        max_output_len: 2048
+      rtx-pro-4000:
+        max_input_len: 4096
+        max_output_len: 1024
+
+# Benchmarking targets (from SOW KPIs)
+benchmarks:
+  ttft:
+    p50_target_ms: 100
+    p90_target_ms: 300
+    p99_target_ms: 500
+  throughput:
+    min_tokens_per_second: 50
+  concurrency:
+    min_sessions: 8
+  memory:
+    max_utilization_percent: 80
