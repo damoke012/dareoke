@@ -129,6 +129,16 @@ From the SOW:
 ### On Failover/Recovery:
 > "Failover, rollback, and recovery tests will be limited to the model and container level, as firmware-level or full Jetson device failures will require physical intervention."
 
+### On Cloud-Agnostic Architecture:
+> From meeting notes: Honeywell wants a **cloud-agnostic solution** - the deployment must work independently of any specific cloud provider.
+
+**What this means for you:**
+- No AWS/Azure/GCP-specific services (avoid managed K8s like EKS/AKS/GKE)
+- Deployment scripts must be portable
+- If orchestration is used, it should be vanilla Kubernetes (K3s, MicroK8s) not cloud-managed
+- Container images should work on any registry (not tied to ECR/ACR/GCR)
+- Monitoring/observability should use open-source tools (Prometheus, not CloudWatch)
+
 ---
 
 ## What You Need to Prepare
