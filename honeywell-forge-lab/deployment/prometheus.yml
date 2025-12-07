@@ -1,0 +1,23 @@
+# Prometheus configuration for Forge Cognition
+# Scrapes inference server and GPU metrics
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Inference server metrics
+  - job_name: 'forge-inference'
+    static_configs:
+      - targets: ['forge-inference:8000']
+    metrics_path: /metrics
+
+  # DCGM GPU metrics
+  - job_name: 'gpu-metrics'
+    static_configs:
+      - targets: ['gpu-exporter:9400']
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

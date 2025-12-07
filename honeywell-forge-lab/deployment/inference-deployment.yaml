@@ -1,8 +1,15 @@
 # Honeywell Forge Cognition - Inference Server Deployment
-# Simulates edge deployment on constrained GPU hardware
+# Cloud-agnostic deployment for edge GPU hardware
 #
 # Deploy with:
-#   oc apply -f deployment/
+#   kubectl apply -f deployment/inference-deployment.yaml
+#
+# For single-device edge deployment (no K8s), use:
+#   docker-compose -f deployment/docker-compose.yaml up -d
+#
+# Registry Configuration:
+#   Set REGISTRY env var before build/deploy:
+#   export REGISTRY=your-registry.com/honeywell
 #
 apiVersion: apps/v1
 kind: Deployment
@@ -125,18 +132,41 @@ data:
     target_ttft_ms: 100.0
     target_tps: 50.0
 ---
-apiVersion: route.openshift.io/v1
-kind: Route
-metadata:
-  name: forge-inference
-  labels:
-    app: forge-inference
-spec:
-  to:
-    kind: Service
-    name: forge-inference
-  port:
-    targetPort: http
-  tls:
-    termination: edge
-    insecureEdgeTerminationPolicy: Redirect
+# Optional: Kubernetes Ingress (for K3s/MicroK8s deployments)
+# Uncomment if you need external access via ingress controller
+# apiVersion: networking.k8s.io/v1
+# kind: Ingress
+# metadata:
+#   name: forge-inference
+#   labels:
+#     app: forge-inference
+#   annotations:
+#     # Works with nginx, traefik, or any standard ingress controller
+#     kubernetes.io/ingress.class: "nginx"
+# spec:
+#   rules:
+#   - host: forge-inference.local
+#     http:
+#       paths:
+#       - path: /
+#         pathType: Prefix
+#         backend:
+#           service:
+#             name: forge-inference
+#             port:
+#               number: 8000
+---
+# Alternative: NodePort Service for direct access (simpler for edge)
+# Uncomment to expose on port 30800
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: forge-inference-nodeport
+# spec:
+#   type: NodePort
+#   ports:
+#   - port: 8000
+#     targetPort: 8000
+#     nodePort: 30800
+#   selector:
+#     app: forge-inference

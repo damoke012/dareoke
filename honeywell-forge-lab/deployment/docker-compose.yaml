@@ -1,0 +1,119 @@
+# Honeywell Forge Cognition - Docker Compose Deployment
+# For single-device edge deployment (Jetson Thor / RTX 4000 Pro)
+# No Kubernetes required - runs directly on device
+#
+# Usage:
+#   docker-compose up -d              # Start services
+#   docker-compose logs -f            # View logs
+#   docker-compose down               # Stop services
+#   docker-compose pull               # Update images
+#
+# Build locally:
+#   docker-compose build
+#
+# With custom registry:
+#   REGISTRY=your-registry.com/honeywell docker-compose up -d
+
+version: '3.8'
+
+services:
+  forge-inference:
+    image: ${REGISTRY:-forge}/inference-server:${VERSION:-latest}
+    build:
+      context: ../inference-server
+      dockerfile: Dockerfile
+    container_name: forge-inference
+    restart: unless-stopped
+    ports:
+      - "8000:8000"   # HTTP API
+      - "9090:9090"   # Metrics (if separate)
+    environment:
+      - MODEL_NAME=${MODEL_NAME:-maintenance-assist}
+      - MAX_CONCURRENT_SESSIONS=${MAX_CONCURRENT_SESSIONS:-10}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0
+    volumes:
+      - model-cache:/models
+      - ./config:/app/config:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+        limits:
+          memory: 32G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "3"
+
+  # GPU Metrics Exporter (for Prometheus scraping)
+  gpu-exporter:
+    image: ${REGISTRY:-nvidia}/dcgm-exporter:3.3.0-3.2.0-ubuntu22.04
+    container_name: forge-gpu-exporter
+    restart: unless-stopped
+    ports:
+      - "9400:9400"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - DCGM_EXPORTER_LISTEN=:9400
+      - DCGM_EXPORTER_KUBERNETES=false
+
+  # Prometheus (local metrics collection)
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: forge-prometheus
+    restart: unless-stopped
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=7d'
+      - '--web.enable-lifecycle'
+
+  # Grafana (optional - for dashboards)
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: forge-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+
+volumes:
+  model-cache:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+
+networks:
+  default:
+    name: forge-network
