@@ -1,18 +1,27 @@
 # Honeywell Forge Cognition - Docker Compose Deployment
-# For single-device edge deployment (Jetson Thor / RTX 4000 Pro)
-# No Kubernetes required - runs directly on device
+# Unified deployment for both hardware SKUs:
+#   - SKU 1: Jetson AGX Thor (ARM64)
+#   - SKU 2: RTX 4000 Pro (x86_64)
+#
+# SKU auto-detection is enabled by default. The container will
+# automatically configure itself based on detected hardware.
 #
 # Usage:
-#   docker-compose up -d              # Start services
+#   docker-compose up -d              # Start with auto-detection
 #   docker-compose logs -f            # View logs
 #   docker-compose down               # Stop services
-#   docker-compose pull               # Update images
 #
-# Build locally:
-#   docker-compose build
+# SKU Override (if auto-detection fails):
+#   FORGE_SKU=jetson_thor docker-compose up -d
+#   FORGE_SKU=rtx_4000_pro docker-compose up -d
 #
 # With custom registry:
-#   REGISTRY=your-registry.com/honeywell docker-compose up -d
+#   REGISTRY=harbor.honeywell.com/forge docker-compose up -d
+#
+# Platform-specific builds:
+#   docker-compose build                    # Build for current platform
+#   docker buildx bake --set *.platform=linux/arm64   # Jetson
+#   docker buildx bake --set *.platform=linux/amd64   # RTX
 
 version: '3.8'
 
@@ -28,8 +37,10 @@ services:
       - "8000:8000"   # HTTP API
       - "9090:9090"   # Metrics (if separate)
     environment:
+      # SKU auto-detection (set FORGE_SKU to override)
+      - FORGE_SKU_AUTO_DETECT=true
+      - FORGE_SKU=${FORGE_SKU:-}
       - MODEL_NAME=${MODEL_NAME:-maintenance-assist}
-      - MAX_CONCURRENT_SESSIONS=${MAX_CONCURRENT_SESSIONS:-10}
       - NVIDIA_VISIBLE_DEVICES=all
       - CUDA_VISIBLE_DEVICES=0
     volumes:
@@ -42,8 +53,9 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+        # Memory limit is SKU-aware (set via override files)
         limits:
-          memory: 32G
+          memory: ${MEMORY_LIMIT:-32G}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s

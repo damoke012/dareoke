@@ -1,0 +1,112 @@
+# Honeywell Forge Cognition - SKU Hardware Profiles
+# Unified configuration for both hardware SKUs
+#
+# SKU detection is automatic based on:
+#   1. GPU name from nvidia-smi
+#   2. Architecture (ARM64 vs x86_64)
+#   3. Memory configuration
+
+# ============================================================================
+# SKU 1: Jetson AGX Thor
+# ============================================================================
+jetson_thor:
+  description: "NVIDIA Jetson AGX Thor - Embedded Edge AI"
+  detection:
+    architecture: "aarch64"
+    gpu_patterns:
+      - "Thor"
+      - "Orin"  # Fallback for dev on Orin
+
+  hardware:
+    gpu_memory_gb: 128        # Unified memory (shared with CPU)
+    gpu_memory_type: "unified"
+    tdp_watts: 100
+    nvlink_available: true
+
+  inference:
+    max_concurrent_sessions: 20
+    max_batch_size: 16
+    kv_cache_gb: 40           # Larger KV cache due to unified memory
+    quantization: "FP8"       # Thor supports FP8 natively
+
+  optimization:
+    tensor_parallel: 1
+    pipeline_parallel: 1
+    use_paged_attention: true
+    use_inflight_batching: true
+
+  thresholds:
+    memory_warning_percent: 70
+    memory_critical_percent: 85
+    target_ttft_ms: 80
+    target_tps: 60
+
+# ============================================================================
+# SKU 2: RTX 4000 Pro (Ada Lovelace)
+# ============================================================================
+rtx_4000_pro:
+  description: "NVIDIA RTX 4000 Pro - Workstation GPU"
+  detection:
+    architecture: "x86_64"
+    gpu_patterns:
+      - "RTX 4000"
+      - "RTX 4000 Ada"
+      - "AD104"  # GPU chip identifier
+
+  hardware:
+    gpu_memory_gb: 20         # Dedicated VRAM
+    gpu_memory_type: "dedicated"
+    tdp_watts: 130
+    nvlink_available: false
+
+  inference:
+    max_concurrent_sessions: 8
+    max_batch_size: 8
+    kv_cache_gb: 8            # Smaller due to limited VRAM
+    quantization: "FP16"      # FP8 may have perf issues on Ada
+
+  optimization:
+    tensor_parallel: 1
+    pipeline_parallel: 1
+    use_paged_attention: true
+    use_inflight_batching: true
+
+  thresholds:
+    memory_warning_percent: 80
+    memory_critical_percent: 90
+    target_ttft_ms: 100
+    target_tps: 50
+
+# ============================================================================
+# Development/Fallback Profile
+# ============================================================================
+generic:
+  description: "Generic GPU - Development/Testing"
+  detection:
+    architecture: "*"
+    gpu_patterns:
+      - "*"  # Matches any GPU
+
+  hardware:
+    gpu_memory_gb: 8
+    gpu_memory_type: "dedicated"
+    tdp_watts: 100
+    nvlink_available: false
+
+  inference:
+    max_concurrent_sessions: 4
+    max_batch_size: 4
+    kv_cache_gb: 2
+    quantization: "FP16"
+
+  optimization:
+    tensor_parallel: 1
+    pipeline_parallel: 1
+    use_paged_attention: false
+    use_inflight_batching: false
+
+  thresholds:
+    memory_warning_percent: 80
+    memory_critical_percent: 90
+    target_ttft_ms: 200
+    target_tps: 30

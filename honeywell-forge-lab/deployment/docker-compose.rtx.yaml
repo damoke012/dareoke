@@ -1,0 +1,52 @@
+# Honeywell Forge Cognition - RTX 4000 Pro Override
+# SKU 2: x86_64, ~20GB dedicated VRAM, 130W TDP
+#
+# Usage:
+#   docker-compose -f docker-compose.yaml -f docker-compose.rtx.yaml up -d
+#
+# Or set as default:
+#   export COMPOSE_FILE=docker-compose.yaml:docker-compose.rtx.yaml
+#   docker-compose up -d
+
+version: '3.8'
+
+services:
+  forge-inference:
+    # Force RTX SKU (in case auto-detection needs help)
+    environment:
+      - FORGE_SKU=rtx_4000_pro
+    deploy:
+      resources:
+        limits:
+          # RTX 4000 Pro has ~20GB VRAM + system RAM
+          # Container memory limit for system RAM (VRAM is separate)
+          memory: 16G
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu, compute, utility]
+
+  # Standard DCGM exporter for x86_64
+  gpu-exporter:
+    image: nvcr.io/nvidia/dcgm-exporter:3.3.0-3.2.0-ubuntu22.04
+    container_name: forge-gpu-exporter
+    restart: unless-stopped
+    ports:
+      - "9400:9400"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - DCGM_EXPORTER_LISTEN=:9400
+      - DCGM_EXPORTER_KUBERNETES=false
+
+  prometheus:
+    image: prom/prometheus:v2.48.0
+
+  grafana:
+    image: grafana/grafana:10.2.0

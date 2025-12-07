@@ -1,0 +1,53 @@
+# Honeywell Forge Cognition - Jetson AGX Thor Override
+# SKU 1: ARM64, 128GB unified memory, 100W TDP
+#
+# Usage:
+#   docker-compose -f docker-compose.yaml -f docker-compose.jetson.yaml up -d
+#
+# Or set as default:
+#   export COMPOSE_FILE=docker-compose.yaml:docker-compose.jetson.yaml
+#   docker-compose up -d
+
+version: '3.8'
+
+services:
+  forge-inference:
+    # Force Jetson SKU (in case auto-detection needs help)
+    environment:
+      - FORGE_SKU=jetson_thor
+    deploy:
+      resources:
+        limits:
+          # Jetson Thor has 128GB unified memory
+          # Reserve ~100GB for inference, leave rest for system
+          memory: 100G
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu, compute, utility]
+
+  # Jetson-specific GPU exporter (L4T-based)
+  gpu-exporter:
+    image: nvcr.io/nvidia/l4t-jetpack:r36.3.0
+    container_name: forge-gpu-exporter
+    restart: unless-stopped
+    command: >
+      sh -c "while true; do tegrastats --interval 5000; done"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Prometheus still works on ARM64
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    # ARM64 native image available
+
+  # Grafana still works on ARM64
+  grafana:
+    image: grafana/grafana:10.2.0
+    # ARM64 native image available

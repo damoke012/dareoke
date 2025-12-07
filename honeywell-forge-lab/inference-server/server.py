@@ -1,21 +1,27 @@
 """
-Honeywell Forge Cognition - Inference Server Prototype
-Simulates multi-user LLM inference on constrained GPU hardware
+Honeywell Forge Cognition - Unified Inference Server
+Supports both hardware SKUs with automatic detection and optimization:
+  - SKU 1: Jetson AGX Thor (ARM64, 128GB unified memory)
+  - SKU 2: RTX 4000 Pro (x86_64, ~20GB VRAM)
 
 Key Features:
+- Automatic SKU detection and configuration
 - TensorRT-LLM optimized inference
-- Concurrent session management
+- Concurrent session management with SKU-appropriate limits
 - Real-time latency tracking
-- GPU memory monitoring
+- GPU memory monitoring with SKU-specific thresholds
 - Prometheus metrics export
 """
 
 import asyncio
+import os
+import platform
 import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import yaml
 import numpy as np
@@ -27,8 +33,24 @@ from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTEN
 from starlette.responses import Response
 
 # ============================================================================
-# Configuration
+# SKU Detection and Configuration
 # ============================================================================
+
+@dataclass
+class SKUProfile:
+    """Hardware profile for a specific SKU"""
+    name: str
+    description: str
+    gpu_memory_gb: float
+    gpu_memory_type: str
+    max_concurrent_sessions: int
+    max_batch_size: int
+    kv_cache_gb: float
+    quantization: str
+    memory_warning_percent: float
+    memory_critical_percent: float
+    target_ttft_ms: float
+    target_tps: float
 
 @dataclass
 class ServerConfig:
@@ -36,17 +58,114 @@ class ServerConfig:
     max_concurrent_sessions: int = 10
     max_tokens: int = 512
     temperature: float = 0.7
-    gpu_memory_threshold: float = 0.85  # Alert if GPU memory > 85%
-    target_ttft_ms: float = 100.0  # Target time to first token
-    target_tps: float = 50.0  # Target tokens per second
+    gpu_memory_threshold: float = 0.85
+    target_ttft_ms: float = 100.0
+    target_tps: float = 50.0
+    # SKU-specific
+    sku_name: str = "unknown"
+    sku_description: str = ""
+    quantization: str = "FP16"
 
-def load_config(path: str = "config.yaml") -> ServerConfig:
+def detect_sku() -> str:
+    """
+    Detect which SKU we're running on based on:
+    1. Architecture (ARM64 = Jetson, x86_64 = RTX)
+    2. GPU name pattern matching
+    """
+    arch = platform.machine()
+
+    # Check architecture first
+    if arch in ("aarch64", "arm64"):
+        return "jetson_thor"
+    elif arch in ("x86_64", "AMD64"):
+        # Could be RTX 4000 Pro or dev machine - check GPU
+        try:
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            gpu_name = pynvml.nvmlDeviceGetName(handle)
+            if isinstance(gpu_name, bytes):
+                gpu_name = gpu_name.decode('utf-8')
+            pynvml.nvmlShutdown()
+
+            if "RTX 4000" in gpu_name or "AD104" in gpu_name:
+                return "rtx_4000_pro"
+            else:
+                return "generic"
+        except Exception:
+            return "generic"
+    else:
+        return "generic"
+
+def load_sku_profiles(path: str = "sku_profiles.yaml") -> Dict:
+    """Load SKU profiles from YAML"""
     try:
         with open(path, 'r') as f:
-            data = yaml.safe_load(f)
-            return ServerConfig(**data) if data else ServerConfig()
+            return yaml.safe_load(f) or {}
     except FileNotFoundError:
-        return ServerConfig()
+        print(f"Warning: SKU profiles not found at {path}")
+        return {}
+
+def load_config(config_path: str = "config.yaml", profiles_path: str = "sku_profiles.yaml") -> ServerConfig:
+    """
+    Load configuration with SKU auto-detection.
+    SKU-specific settings override base config.
+    """
+    # Load base config
+    base_config = {}
+    try:
+        with open(config_path, 'r') as f:
+            base_config = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        pass
+
+    # Detect SKU
+    auto_detect = os.environ.get("FORGE_SKU_AUTO_DETECT", "true").lower() == "true"
+    sku_override = os.environ.get("FORGE_SKU")
+
+    if sku_override:
+        sku_name = sku_override
+        print(f"SKU override: {sku_name}")
+    elif auto_detect:
+        sku_name = detect_sku()
+        print(f"Auto-detected SKU: {sku_name}")
+    else:
+        sku_name = "generic"
+
+    # Load SKU profiles and apply
+    profiles = load_sku_profiles(profiles_path)
+    sku_profile = profiles.get(sku_name, profiles.get("generic", {}))
+
+    # Merge: base config < SKU defaults < environment overrides
+    config_dict = {
+        "model_name": base_config.get("model_name", "maintenance-assist"),
+        "max_tokens": base_config.get("max_tokens", 512),
+        "temperature": base_config.get("temperature", 0.7),
+        "sku_name": sku_name,
+        "sku_description": sku_profile.get("description", ""),
+    }
+
+    # Apply SKU-specific inference settings
+    inference = sku_profile.get("inference", {})
+    config_dict["max_concurrent_sessions"] = inference.get(
+        "max_concurrent_sessions",
+        base_config.get("max_concurrent_sessions", 10)
+    )
+    config_dict["quantization"] = inference.get("quantization", "FP16")
+
+    # Apply SKU-specific thresholds
+    thresholds = sku_profile.get("thresholds", {})
+    config_dict["gpu_memory_threshold"] = thresholds.get(
+        "memory_critical_percent", 85
+    ) / 100.0
+    config_dict["target_ttft_ms"] = thresholds.get("target_ttft_ms", 100.0)
+    config_dict["target_tps"] = thresholds.get("target_tps", 50.0)
+
+    print(f"Configuration loaded for SKU: {sku_name}")
+    print(f"  Max concurrent sessions: {config_dict['max_concurrent_sessions']}")
+    print(f"  Memory threshold: {config_dict['gpu_memory_threshold']*100:.0f}%")
+    print(f"  Target TTFT: {config_dict['target_ttft_ms']}ms")
+
+    return ServerConfig(**config_dict)
 
 config = load_config()
 
@@ -335,6 +454,8 @@ class HealthResponse(BaseModel):
     model_loaded: bool
     active_sessions: int
     gpu_stats: List[Dict]
+    sku: str
+    sku_description: str
 
 # ============================================================================
 # FastAPI Application
@@ -374,13 +495,32 @@ app = FastAPI(
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint with GPU stats"""
+    """Health check endpoint with GPU stats and SKU info"""
     return HealthResponse(
         status="healthy" if inference_engine.loaded else "loading",
         model_loaded=inference_engine.loaded,
         active_sessions=len(session_manager.sessions),
-        gpu_stats=gpu_monitor.get_gpu_stats()
+        gpu_stats=gpu_monitor.get_gpu_stats(),
+        sku=config.sku_name,
+        sku_description=config.sku_description
     )
+
+@app.get("/v1/sku")
+async def get_sku_info():
+    """Get detailed SKU information and applied configuration"""
+    return {
+        "sku_name": config.sku_name,
+        "sku_description": config.sku_description,
+        "architecture": platform.machine(),
+        "applied_config": {
+            "max_concurrent_sessions": config.max_concurrent_sessions,
+            "gpu_memory_threshold": config.gpu_memory_threshold,
+            "target_ttft_ms": config.target_ttft_ms,
+            "target_tps": config.target_tps,
+            "quantization": config.quantization,
+        },
+        "gpu_info": gpu_monitor.get_gpu_stats()
+    }
 
 @app.post("/v1/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
