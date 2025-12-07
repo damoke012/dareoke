@@ -89,6 +89,8 @@ def detect_sku() -> str:
 
             if "RTX 4000" in gpu_name or "AD104" in gpu_name:
                 return "rtx_4000_pro"
+            elif "Tesla P40" in gpu_name or "P40" in gpu_name:
+                return "tesla_p40"
             else:
                 return "generic"
         except Exception:

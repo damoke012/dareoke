@@ -78,6 +78,41 @@ rtx_4000_pro:
     target_tps: 50
 
 # ============================================================================
+# Lab Environment: Tesla P40 (Dario's OpenShift Lab)
+# ============================================================================
+tesla_p40:
+  description: "NVIDIA Tesla P40 - Lab/Dev Environment"
+  detection:
+    architecture: "x86_64"
+    gpu_patterns:
+      - "Tesla P40"
+      - "P40"
+
+  hardware:
+    gpu_memory_gb: 24
+    gpu_memory_type: "dedicated"
+    tdp_watts: 250
+    nvlink_available: false
+
+  inference:
+    max_concurrent_sessions: 10
+    max_batch_size: 8
+    kv_cache_gb: 10
+    quantization: "FP16"
+
+  optimization:
+    tensor_parallel: 1
+    pipeline_parallel: 1
+    use_paged_attention: true
+    use_inflight_batching: true
+
+  thresholds:
+    memory_warning_percent: 75
+    memory_critical_percent: 85
+    target_ttft_ms: 150
+    target_tps: 40
+
+# ============================================================================
 # Development/Fallback Profile
 # ============================================================================
 generic:
