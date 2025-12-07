@@ -1,0 +1,113 @@
+# Dual-SKU Simulation Environment
+# Runs BOTH Jetson Thor and RTX 4000 Pro configurations simultaneously
+#
+# Usage:
+#   docker-compose -f docker-compose.dual-sku.yaml up -d
+#
+# Access:
+#   Jetson Thor: http://localhost:8001
+#   RTX 4000 Pro: http://localhost:8002
+#   Prometheus: http://localhost:9091
+#   Grafana: http://localhost:3000
+
+version: '3.8'
+
+services:
+  # ============================================================
+  # SKU 1: Jetson AGX Thor Simulation
+  # ============================================================
+  forge-jetson:
+    image: ${REGISTRY:-forge}-inference:${VERSION:-latest}
+    build:
+      context: ../inference-server
+      dockerfile: Dockerfile
+    container_name: forge-jetson-sim
+    ports:
+      - "8001:8000"
+    environment:
+      - FORGE_SKU=jetson_thor
+      - FORGE_SKU_AUTO_DETECT=false
+      - MODEL_NAME=maintenance-assist
+      - NVIDIA_VISIBLE_DEVICES=all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+        limits:
+          # Simulate Jetson's higher memory availability
+          memory: 64G
+    labels:
+      - "forge.sku=jetson_thor"
+      - "forge.simulation=true"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+
+  # ============================================================
+  # SKU 2: RTX 4000 Pro Simulation
+  # ============================================================
+  forge-rtx:
+    image: ${REGISTRY:-forge}-inference:${VERSION:-latest}
+    build:
+      context: ../inference-server
+      dockerfile: Dockerfile
+    container_name: forge-rtx-sim
+    ports:
+      - "8002:8000"
+    environment:
+      - FORGE_SKU=rtx_4000_pro
+      - FORGE_SKU_AUTO_DETECT=false
+      - MODEL_NAME=maintenance-assist
+      - NVIDIA_VISIBLE_DEVICES=all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+        limits:
+          # Simulate RTX's more constrained memory
+          memory: 16G
+    labels:
+      - "forge.sku=rtx_4000_pro"
+      - "forge.simulation=true"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+
+  # ============================================================
+  # Unified Monitoring (scrapes both SKUs)
+  # ============================================================
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: forge-prometheus-dual
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./prometheus-dual.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=1d'
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: forge-grafana-dual
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - prometheus
+
+networks:
+  default:
+    name: forge-dual-sku-network

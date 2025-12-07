@@ -1,0 +1,29 @@
+# Prometheus config for dual-SKU simulation
+# Scrapes both Jetson and RTX simulation endpoints
+
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  # Jetson Thor simulation
+  - job_name: 'forge-jetson-thor'
+    static_configs:
+      - targets: ['forge-jetson:8000']
+    metrics_path: /metrics
+    relabel_configs:
+      - target_label: sku
+        replacement: 'jetson_thor'
+
+  # RTX 4000 Pro simulation
+  - job_name: 'forge-rtx-4000-pro'
+    static_configs:
+      - targets: ['forge-rtx:8000']
+    metrics_path: /metrics
+    relabel_configs:
+      - target_label: sku
+        replacement: 'rtx_4000_pro'
+
+  # Prometheus self
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
