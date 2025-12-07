@@ -1,0 +1,21 @@
+# Honeywell Forge Cognition - Inference Server Configuration
+# Simulates edge deployment constraints
+
+# Model Configuration
+model_name: "maintenance-assist"
+
+# Session Limits (simulates edge hardware constraints)
+max_concurrent_sessions: 10
+
+# Generation Parameters
+max_tokens: 512
+temperature: 0.7
+
+# Performance Thresholds
+gpu_memory_threshold: 0.85  # Alert if GPU memory > 85%
+target_ttft_ms: 100.0       # Target time to first token (P90)
+target_tps: 50.0            # Target output tokens per second
+
+# Hardware Profiles (for reference)
+# RTX 4000 Pro: ~20GB VRAM, target 5-8 concurrent sessions
+# Jetson Thor: 128GB unified, target 15-20 concurrent sessions

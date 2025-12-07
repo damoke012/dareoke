@@ -1,0 +1,142 @@
+# Honeywell Forge Cognition - Inference Server Deployment
+# Simulates edge deployment on constrained GPU hardware
+#
+# Deploy with:
+#   oc apply -f deployment/
+#
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forge-inference
+  labels:
+    app: forge-inference
+    project: honeywell-cognition
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: forge-inference
+  template:
+    metadata:
+      labels:
+        app: forge-inference
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: inference-server
+        image: forge-inference:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+            memory: "32Gi"
+            cpu: "8"
+          requests:
+            nvidia.com/gpu: 1
+            memory: "16Gi"
+            cpu: "4"
+        env:
+        - name: MODEL_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: forge-inference-config
+              key: model_name
+        - name: MAX_CONCURRENT_SESSIONS
+          valueFrom:
+            configMapKeyRef:
+              name: forge-inference-config
+              key: max_concurrent_sessions
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: "all"
+        - name: CUDA_VISIBLE_DEVICES
+          value: "0"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+        volumeMounts:
+        - name: model-cache
+          mountPath: /models
+        - name: config
+          mountPath: /app/config.yaml
+          subPath: config.yaml
+      volumes:
+      - name: model-cache
+        emptyDir:
+          sizeLimit: 50Gi
+      - name: config
+        configMap:
+          name: forge-inference-config
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: forge-inference
+  labels:
+    app: forge-inference
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
+    name: http
+  selector:
+    app: forge-inference
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: forge-inference-config
+data:
+  model_name: "maintenance-assist"
+  max_concurrent_sessions: "10"
+  config.yaml: |
+    model_name: "maintenance-assist"
+    max_concurrent_sessions: 10
+    max_tokens: 512
+    temperature: 0.7
+    gpu_memory_threshold: 0.85
+    target_ttft_ms: 100.0
+    target_tps: 50.0
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: forge-inference
+  labels:
+    app: forge-inference
+spec:
+  to:
+    kind: Service
+    name: forge-inference
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
