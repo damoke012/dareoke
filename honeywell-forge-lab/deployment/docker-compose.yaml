@@ -1,7 +1,13 @@
 # Honeywell Forge Cognition - Docker Compose Deployment
 # Unified deployment for both hardware SKUs:
-#   - SKU 1: Jetson AGX Thor (ARM64)
-#   - SKU 2: RTX 4000 Pro (x86_64)
+#   - SKU 1: Jetson AGX Thor (ARM64, 128GB unified)
+#   - SKU 2: RTX 4000 Pro (x86_64, 20GB VRAM)
+#
+# Performance Optimizations:
+#   - KV Cache: FP8 dtype (4x memory savings vs FP32)
+#   - Paged Attention: Reduces memory fragmentation
+#   - Session Limits: Per-SKU to prevent OOM
+#   - Queue Depth: Graceful degradation under load
 #
 # SKU auto-detection is enabled by default. The container will
 # automatically configure itself based on detected hardware.
@@ -22,6 +28,11 @@
 #   docker-compose build                    # Build for current platform
 #   docker buildx bake --set *.platform=linux/arm64   # Jetson
 #   docker buildx bake --set *.platform=linux/amd64   # RTX
+#
+# Performance endpoints:
+#   curl http://localhost:8000/v1/tensorrt-llm/config
+#   curl http://localhost:8000/v1/performance/targets
+#   curl http://localhost:8000/metrics
 
 version: '3.8'
 
@@ -34,17 +45,22 @@ services:
     container_name: forge-inference
     restart: unless-stopped
     ports:
-      - "8000:8000"   # HTTP API
-      - "9090:9090"   # Metrics (if separate)
+      - "8000:8000"   # HTTP API (includes /metrics endpoint)
     environment:
       # SKU auto-detection (set FORGE_SKU to override)
       - FORGE_SKU_AUTO_DETECT=true
       - FORGE_SKU=${FORGE_SKU:-}
       - MODEL_NAME=${MODEL_NAME:-maintenance-assist}
+      # NVIDIA runtime settings
       - NVIDIA_VISIBLE_DEVICES=all
       - CUDA_VISIBLE_DEVICES=0
+      # Performance tuning (can override SKU defaults)
+      - FORGE_KV_CACHE_DTYPE=${KV_CACHE_DTYPE:-}
+      - FORGE_MAX_SESSIONS=${MAX_SESSIONS:-}
     volumes:
+      # Model storage (TensorRT engines)
       - model-cache:/models
+      # Configuration (sku_profiles.yaml)
       - ./config:/app/config:ro
     deploy:
       resources:
@@ -52,21 +68,30 @@ services:
           devices:
             - driver: nvidia
               count: 1
-              capabilities: [gpu]
+              capabilities: [gpu, compute, utility]
         # Memory limit is SKU-aware (set via override files)
         limits:
           memory: ${MEMORY_LIMIT:-32G}
+          cpus: '${CPU_LIMIT:-4}'
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 120s
+      start_period: 120s   # Model loading takes time
     logging:
       driver: json-file
       options:
         max-size: "100m"
-        max-file: "3"
+        max-file: "5"
+    # Ulimits for high-performance inference
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
 
   # GPU Metrics Exporter (for Prometheus scraping)
   gpu-exporter:

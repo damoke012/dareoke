@@ -53,6 +53,21 @@ class SKUProfile:
     target_tps: float
 
 @dataclass
+class TensorRTLLMConfig:
+    """TensorRT-LLM specific performance settings"""
+    kv_cache_dtype: str = "fp16"
+    kv_cache_free_gpu_memory_fraction: float = 0.85
+    enable_chunked_context: bool = True
+    max_num_tokens: int = 4096
+    use_paged_kv_cache: bool = True
+    tokens_per_block: int = 64
+    scheduler_policy: str = "max_utilization"
+    enable_kv_cache_reuse: bool = True
+    gpu_memory_utilization: float = 0.90
+    streaming: bool = True
+    streaming_interval: int = 1
+
+@dataclass
 class ServerConfig:
     model_name: str = "maintenance-assist"
     max_concurrent_sessions: int = 10
@@ -60,11 +75,15 @@ class ServerConfig:
     temperature: float = 0.7
     gpu_memory_threshold: float = 0.85
     target_ttft_ms: float = 100.0
+    target_ttft_p99_ms: float = 2000.0
     target_tps: float = 50.0
+    max_queue_depth: int = 10
     # SKU-specific
     sku_name: str = "unknown"
     sku_description: str = ""
     quantization: str = "FP16"
+    # TensorRT-LLM settings
+    tensorrt_llm: TensorRTLLMConfig = field(default_factory=TensorRTLLMConfig)
 
 def detect_sku() -> str:
     """
@@ -160,12 +179,33 @@ def load_config(config_path: str = "config.yaml", profiles_path: str = "sku_prof
         "memory_critical_percent", 85
     ) / 100.0
     config_dict["target_ttft_ms"] = thresholds.get("target_ttft_ms", 100.0)
+    config_dict["target_ttft_p99_ms"] = thresholds.get("target_ttft_p99_ms", 2000.0)
     config_dict["target_tps"] = thresholds.get("target_tps", 50.0)
+    config_dict["max_queue_depth"] = thresholds.get("max_queue_depth", 10)
+
+    # Apply TensorRT-LLM specific settings
+    trtllm_settings = sku_profile.get("tensorrt_llm", {})
+    config_dict["tensorrt_llm"] = TensorRTLLMConfig(
+        kv_cache_dtype=trtllm_settings.get("kv_cache_dtype", "fp16"),
+        kv_cache_free_gpu_memory_fraction=trtllm_settings.get("kv_cache_free_gpu_memory_fraction", 0.85),
+        enable_chunked_context=trtllm_settings.get("enable_chunked_context", True),
+        max_num_tokens=trtllm_settings.get("max_num_tokens", 4096),
+        use_paged_kv_cache=trtllm_settings.get("use_paged_kv_cache", True),
+        tokens_per_block=trtllm_settings.get("tokens_per_block", 64),
+        scheduler_policy=trtllm_settings.get("scheduler_policy", "max_utilization"),
+        enable_kv_cache_reuse=trtllm_settings.get("enable_kv_cache_reuse", True),
+        gpu_memory_utilization=trtllm_settings.get("gpu_memory_utilization", 0.90),
+        streaming=trtllm_settings.get("streaming", True),
+        streaming_interval=trtllm_settings.get("streaming_interval", 1),
+    )
 
     print(f"Configuration loaded for SKU: {sku_name}")
     print(f"  Max concurrent sessions: {config_dict['max_concurrent_sessions']}")
     print(f"  Memory threshold: {config_dict['gpu_memory_threshold']*100:.0f}%")
-    print(f"  Target TTFT: {config_dict['target_ttft_ms']}ms")
+    print(f"  Target TTFT: {config_dict['target_ttft_ms']}ms (P99: {config_dict['target_ttft_p99_ms']}ms)")
+    print(f"  KV Cache dtype: {config_dict['tensorrt_llm'].kv_cache_dtype}")
+    print(f"  Paged KV Cache: {config_dict['tensorrt_llm'].use_paged_kv_cache}")
+    print(f"  Scheduler: {config_dict['tensorrt_llm'].scheduler_policy}")
 
     return ServerConfig(**config_dict)
 
@@ -210,6 +250,21 @@ ACTIVE_SESSIONS = Gauge(
     'Number of active inference sessions'
 )
 
+MAX_SESSIONS = Gauge(
+    'forge_max_sessions',
+    'Maximum allowed concurrent sessions'
+)
+
+QUEUE_DEPTH = Gauge(
+    'forge_queue_depth',
+    'Current request queue depth'
+)
+
+MAX_QUEUE_DEPTH = Gauge(
+    'forge_max_queue_depth',
+    'Maximum allowed queue depth before rejection'
+)
+
 GPU_MEMORY_USED = Gauge(
     'forge_gpu_memory_used_bytes',
     'GPU memory used in bytes',
@@ -226,6 +281,22 @@ GPU_UTILIZATION = Gauge(
     'forge_gpu_utilization_percent',
     'GPU utilization percentage',
     ['gpu_id']
+)
+
+# Performance target gauges (for Grafana thresholds)
+TARGET_TTFT_MS = Gauge(
+    'forge_target_ttft_ms',
+    'Target TTFT in milliseconds'
+)
+
+TARGET_TTFT_P99_MS = Gauge(
+    'forge_target_ttft_p99_ms',
+    'Target P99 TTFT in milliseconds'
+)
+
+TARGET_TPS = Gauge(
+    'forge_target_tps',
+    'Target tokens per second'
 )
 
 # ============================================================================
@@ -467,6 +538,18 @@ class HealthResponse(BaseModel):
 async def lifespan(app: FastAPI):
     # Startup
     print("Starting Forge Cognition Inference Server...")
+    print(f"SKU: {config.sku_name}")
+    print(f"TensorRT-LLM KV Cache: {config.tensorrt_llm.kv_cache_dtype}")
+
+    # Set initial gauge values for Grafana thresholds
+    MAX_SESSIONS.set(config.max_concurrent_sessions)
+    MAX_QUEUE_DEPTH.set(config.max_queue_depth)
+    TARGET_TTFT_MS.set(config.target_ttft_ms)
+    TARGET_TTFT_P99_MS.set(config.target_ttft_p99_ms)
+    TARGET_TPS.set(config.target_tps)
+    ACTIVE_SESSIONS.set(0)
+    QUEUE_DEPTH.set(0)
+
     await inference_engine.load_model()
 
     # Start background cleanup task
@@ -630,8 +713,75 @@ async def get_config():
         "max_concurrent_sessions": config.max_concurrent_sessions,
         "max_tokens": config.max_tokens,
         "target_ttft_ms": config.target_ttft_ms,
+        "target_ttft_p99_ms": config.target_ttft_p99_ms,
         "target_tps": config.target_tps,
-        "gpu_memory_threshold": config.gpu_memory_threshold
+        "max_queue_depth": config.max_queue_depth,
+        "gpu_memory_threshold": config.gpu_memory_threshold,
+        "quantization": config.quantization,
+    }
+
+@app.get("/v1/tensorrt-llm/config")
+async def get_tensorrt_llm_config():
+    """
+    Get TensorRT-LLM specific performance settings.
+    These are the settings that would be passed to TensorRT-LLM at runtime.
+    """
+    trtllm = config.tensorrt_llm
+    return {
+        "sku": config.sku_name,
+        "description": "TensorRT-LLM runtime configuration for this SKU",
+        "kv_cache": {
+            "dtype": trtllm.kv_cache_dtype,
+            "free_gpu_memory_fraction": trtllm.kv_cache_free_gpu_memory_fraction,
+            "use_paged_kv_cache": trtllm.use_paged_kv_cache,
+            "tokens_per_block": trtllm.tokens_per_block,
+            "enable_reuse": trtllm.enable_kv_cache_reuse,
+        },
+        "batching": {
+            "enable_chunked_context": trtllm.enable_chunked_context,
+            "max_num_tokens": trtllm.max_num_tokens,
+        },
+        "scheduling": {
+            "policy": trtllm.scheduler_policy,
+        },
+        "memory": {
+            "gpu_memory_utilization": trtllm.gpu_memory_utilization,
+        },
+        "streaming": {
+            "enabled": trtllm.streaming,
+            "interval": trtllm.streaming_interval,
+        },
+        "performance_impact": {
+            "kv_cache_dtype_note": "FP8 uses 4x less memory than FP32 (45GB → 11GB for 20k context)",
+            "paged_attention_note": "Reduces memory fragmentation, enables dynamic allocation",
+            "chunked_context_note": "Better for long contexts (20k+ tokens)",
+        }
+    }
+
+@app.get("/v1/performance/targets")
+async def get_performance_targets():
+    """Get performance targets for this SKU (for monitoring/alerting)"""
+    return {
+        "sku": config.sku_name,
+        "latency": {
+            "ttft_target_ms": config.target_ttft_ms,
+            "ttft_p99_target_ms": config.target_ttft_p99_ms,
+            "description": "Time to First Token targets"
+        },
+        "throughput": {
+            "tokens_per_second_target": config.target_tps,
+            "description": "Output token generation rate"
+        },
+        "capacity": {
+            "max_concurrent_sessions": config.max_concurrent_sessions,
+            "max_queue_depth": config.max_queue_depth,
+            "description": "Request handling limits"
+        },
+        "memory": {
+            "warning_threshold_percent": config.gpu_memory_threshold * 100 - 10,
+            "critical_threshold_percent": config.gpu_memory_threshold * 100,
+            "description": "GPU memory thresholds for alerting"
+        }
     }
 
 # ============================================================================

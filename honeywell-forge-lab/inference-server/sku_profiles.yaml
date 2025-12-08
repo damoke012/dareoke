@@ -5,9 +5,15 @@
 #   1. GPU name from nvidia-smi
 #   2. Architecture (ARM64 vs x86_64)
 #   3. Memory configuration
+#
+# Performance Optimization Strategy:
+#   - KV Cache: FP8 reduces memory 4x vs FP32 (45GB → 11GB)
+#   - Paged Attention: Reduces memory fragmentation
+#   - In-flight Batching: Better GPU utilization
+#   - Session Limits: Prevent OOM and latency spikes
 
 # ============================================================================
-# SKU 1: Jetson AGX Thor
+# SKU 1: Jetson AGX Thor (128GB Unified Memory)
 # ============================================================================
 jetson_thor:
   description: "NVIDIA Jetson AGX Thor - Embedded Edge AI"
@@ -22,6 +28,7 @@ jetson_thor:
     gpu_memory_type: "unified"
     tdp_watts: 100
     nvlink_available: true
+    compute_capability: "8.7"  # Ampere architecture
 
   inference:
     max_concurrent_sessions: 20
@@ -29,20 +36,48 @@ jetson_thor:
     kv_cache_gb: 40           # Larger KV cache due to unified memory
     quantization: "FP8"       # Thor supports FP8 natively
 
+  # TensorRT-LLM Performance Settings
+  tensorrt_llm:
+    # KV Cache - CRITICAL for memory savings
+    kv_cache_dtype: "fp8"              # FP8 vs FP32 = 4x memory savings
+    kv_cache_free_gpu_memory_fraction: 0.85
+
+    # Batching - improves throughput
+    enable_chunked_context: true       # Better for long contexts (20k tokens)
+    max_num_tokens: 8192               # Max tokens per batch
+
+    # Attention optimization
+    use_paged_kv_cache: true           # Reduces memory fragmentation
+    tokens_per_block: 64               # Block size for paged attention
+
+    # Scheduling
+    scheduler_policy: "max_utilization" # vs "guaranteed_no_evict"
+    enable_kv_cache_reuse: true        # Reuse cache for similar prompts
+
+    # Memory management
+    gpu_memory_utilization: 0.90       # Leave 10% headroom
+
+    # Streaming
+    streaming: true
+    streaming_interval: 1              # Tokens between stream updates
+
   optimization:
     tensor_parallel: 1
     pipeline_parallel: 1
     use_paged_attention: true
     use_inflight_batching: true
 
+  # Latency thresholds (for alerting)
   thresholds:
     memory_warning_percent: 70
     memory_critical_percent: 85
-    target_ttft_ms: 80
-    target_tps: 60
+    target_ttft_ms: 500               # 500ms TTFT target (down from 85s!)
+    target_ttft_p99_ms: 2000          # P99 TTFT target
+    target_tps: 60                    # Tokens per second
+    max_queue_depth: 10               # Reject if queue > 10
 
 # ============================================================================
-# SKU 2: RTX 4000 Pro (Ada Lovelace)
+# SKU 2: RTX 4000 Pro (Ada Lovelace - 20GB VRAM)
 # ============================================================================
 rtx_4000_pro:
   description: "NVIDIA RTX 4000 Pro - Workstation GPU"
@@ -58,12 +93,38 @@ rtx_4000_pro:
     gpu_memory_type: "dedicated"
     tdp_watts: 130
     nvlink_available: false
+    compute_capability: "8.9"  # Ada Lovelace
 
   inference:
-    max_concurrent_sessions: 8
+    max_concurrent_sessions: 8   # Lower than Thor due to VRAM limits
     max_batch_size: 8
-    kv_cache_gb: 8            # Smaller due to limited VRAM
-    quantization: "FP16"      # FP8 may have perf issues on Ada
+    kv_cache_gb: 8               # Smaller due to limited VRAM
+    quantization: "FP16"         # FP8 supported but FP16 more stable on Ada
+
+  # TensorRT-LLM Performance Settings (memory-constrained)
+  tensorrt_llm:
+    # KV Cache - aggressive memory optimization
+    kv_cache_dtype: "fp8"              # Still use FP8 for memory savings
+    kv_cache_free_gpu_memory_fraction: 0.80  # More conservative than Thor
+
+    # Batching - smaller batches for VRAM constraints
+    enable_chunked_context: true
+    max_num_tokens: 4096               # Smaller than Thor
+
+    # Attention optimization
+    use_paged_kv_cache: true
+    tokens_per_block: 32               # Smaller blocks for tighter memory
+
+    # Scheduling
+    scheduler_policy: "guaranteed_no_evict"  # Avoid OOM on limited VRAM
+    enable_kv_cache_reuse: true
+
+    # Memory management - CRITICAL for 20GB VRAM
+    gpu_memory_utilization: 0.85       # Leave 15% headroom (vs 10% on Thor)
+
+    # Streaming
+    streaming: true
+    streaming_interval: 1
 
   optimization:
     tensor_parallel: 1
@@ -71,14 +132,17 @@ rtx_4000_pro:
     use_paged_attention: true
     use_inflight_batching: true
 
+  # Latency thresholds (for alerting)
   thresholds:
-    memory_warning_percent: 80
-    memory_critical_percent: 90
-    target_ttft_ms: 100
+    memory_warning_percent: 75         # Earlier warning on limited VRAM
+    memory_critical_percent: 88
+    target_ttft_ms: 750               # Slightly higher than Thor
+    target_ttft_p99_ms: 3000
     target_tps: 50
+    max_queue_depth: 5                # Smaller queue on limited hardware
 
 # ============================================================================
-# Lab Environment: Tesla P40 (Dario's OpenShift Lab)
+# Lab Environment: Tesla P40 (Dario's OpenShift Lab - 24GB)
 # ============================================================================
 tesla_p40:
   description: "NVIDIA Tesla P40 - Lab/Dev Environment"
@@ -93,12 +157,38 @@ tesla_p40:
     gpu_memory_type: "dedicated"
     tdp_watts: 250
     nvlink_available: false
+    compute_capability: "6.1"  # Pascal architecture (no FP8!)
 
   inference:
     max_concurrent_sessions: 10
     max_batch_size: 8
     kv_cache_gb: 10
-    quantization: "FP16"
+    quantization: "FP16"         # P40 doesn't support FP8
+
+  # TensorRT-LLM Performance Settings (Pascal limitations)
+  tensorrt_llm:
+    # KV Cache - FP16 only on Pascal
+    kv_cache_dtype: "fp16"             # No FP8 on Pascal!
+    kv_cache_free_gpu_memory_fraction: 0.80
+
+    # Batching
+    enable_chunked_context: true
+    max_num_tokens: 4096
+
+    # Attention - paged attention works on Pascal
+    use_paged_kv_cache: true
+    tokens_per_block: 32
+
+    # Scheduling
+    scheduler_policy: "guaranteed_no_evict"
+    enable_kv_cache_reuse: true
+
+    # Memory management
+    gpu_memory_utilization: 0.85
+
+    # Streaming
+    streaming: true
+    streaming_interval: 1
 
   optimization:
     tensor_parallel: 1
@@ -109,8 +199,10 @@ tesla_p40:
   thresholds:
     memory_warning_percent: 75
     memory_critical_percent: 85
-    target_ttft_ms: 150
+    target_ttft_ms: 1000              # Higher latency expected on Pascal
+    target_ttft_p99_ms: 5000
     target_tps: 40
+    max_queue_depth: 5
 
 # ============================================================================
 # Development/Fallback Profile
@@ -127,6 +219,7 @@ generic:
     gpu_memory_type: "dedicated"
     tdp_watts: 100
     nvlink_available: false
+    compute_capability: "7.0"  # Assume Volta minimum
 
   inference:
     max_concurrent_sessions: 4
@@ -134,14 +227,29 @@ generic:
     kv_cache_gb: 2
     quantization: "FP16"
 
+  tensorrt_llm:
+    kv_cache_dtype: "fp16"
+    kv_cache_free_gpu_memory_fraction: 0.70
+    enable_chunked_context: false
+    max_num_tokens: 2048
+    use_paged_kv_cache: true
+    tokens_per_block: 32
+    scheduler_policy: "guaranteed_no_evict"
+    enable_kv_cache_reuse: false
+    gpu_memory_utilization: 0.80
+    streaming: true
+    streaming_interval: 1
+
   optimization:
     tensor_parallel: 1
     pipeline_parallel: 1
-    use_paged_attention: false
+    use_paged_attention: true
     use_inflight_batching: false
 
   thresholds:
     memory_warning_percent: 80
     memory_critical_percent: 90
-    target_ttft_ms: 200
+    target_ttft_ms: 2000
+    target_ttft_p99_ms: 10000
     target_tps: 30
+    max_queue_depth: 3
