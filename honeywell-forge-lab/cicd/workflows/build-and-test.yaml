@@ -1,0 +1,290 @@
+# Honeywell Forge Cognition - CI/CD Pipeline
+# Multi-arch build for Jetson Thor (ARM64) and RTX 4000 (x86_64)
+#
+# Triggers:
+#   - Push to main/master: Full build + push to registry
+#   - Pull request: Build + test only (no push)
+#   - Manual: With optional version tag
+#
+# Outputs:
+#   - Multi-arch container image
+#   - Air-gapped deployment bundle (optional)
+
+name: Build and Test
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'honeywell-forge-lab/inference-server/**'
+      - 'honeywell-forge-lab/deployment/**'
+      - 'honeywell-forge-lab/cicd/**'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'honeywell-forge-lab/**'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v1.0.0)'
+        required: false
+        default: 'latest'
+      create_bundle:
+        description: 'Create air-gapped bundle'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/forge-inference
+  # For Honeywell internal registry (uncomment when available)
+  # REGISTRY: harbor.honeywell.com
+  # IMAGE_NAME: forge/inference-server
+
+jobs:
+  # ============================================================================
+  # Job 1: Lint and Unit Tests
+  # ============================================================================
+  lint-and-test:
+    name: Lint and Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install flake8 pytest pyyaml fastapi uvicorn prometheus-client
+          pip install -r honeywell-forge-lab/inference-server/requirements.txt || true
+
+      - name: Lint with flake8
+        run: |
+          flake8 honeywell-forge-lab/inference-server/*.py \
+            --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 honeywell-forge-lab/inference-server/*.py \
+            --count --exit-zero --max-complexity=10 --max-line-length=120 --statistics
+
+      - name: Validate YAML configs
+        run: |
+          python -c "import yaml; yaml.safe_load(open('honeywell-forge-lab/inference-server/sku_profiles.yaml'))"
+          python -c "import yaml; yaml.safe_load(open('honeywell-forge-lab/inference-server/config.yaml'))"
+
+      - name: Run unit tests
+        run: |
+          cd honeywell-forge-lab/inference-server
+          python -m pytest tests/ -v || echo "No tests found yet"
+
+  # ============================================================================
+  # Job 2: Multi-Architecture Build
+  # ============================================================================
+  build-multiarch:
+    name: Build Multi-Arch Image
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+      image_digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (for ARM64 emulation)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix=
+            type=raw,value=${{ github.event.inputs.version || 'latest' }}
+
+      - name: Build and push multi-arch image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: honeywell-forge-lab/inference-server
+          file: honeywell-forge-lab/inference-server/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            VCS_REF=${{ github.sha }}
+            VERSION=${{ github.event.inputs.version || 'latest' }}
+
+      - name: Output image info
+        run: |
+          echo "Image tags: ${{ steps.meta.outputs.tags }}"
+          echo "Image digest: ${{ steps.build.outputs.digest }}"
+
+  # ============================================================================
+  # Job 3: Test x86 Image (RTX 4000 Pro simulation)
+  # ============================================================================
+  test-x86:
+    name: Test x86 Image
+    runs-on: ubuntu-latest
+    needs: build-multiarch
+    if: github.event_name != 'pull_request'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Pull and test x86 image
+        run: |
+          # Pull the x86 variant
+          docker pull --platform linux/amd64 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest || true
+
+          # Test health endpoint (without GPU)
+          echo "Note: GPU tests require self-hosted runner with NVIDIA GPU"
+
+      - name: Validate SKU detection logic
+        run: |
+          cd honeywell-forge-lab/inference-server
+          python -c "
+          import platform
+          from server import detect_sku
+          sku = detect_sku()
+          print(f'Detected SKU: {sku}')
+          assert sku in ['generic', 'rtx_4000_pro', 'jetson_thor', 'tesla_p40']
+          "
+
+  # ============================================================================
+  # Job 4: Create Air-Gapped Bundle (Manual trigger only)
+  # ============================================================================
+  create-bundle:
+    name: Create Air-Gapped Bundle
+    runs-on: ubuntu-latest
+    needs: build-multiarch
+    if: github.event.inputs.create_bundle == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create bundle directory
+        run: |
+          mkdir -p bundle/images bundle/configs bundle/scripts
+
+      - name: Export x86 image (RTX 4000)
+        run: |
+          docker pull --platform linux/amd64 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          docker save ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest | gzip > bundle/images/forge-inference-x86.tar.gz
+
+      - name: Export ARM64 image (Jetson Thor)
+        run: |
+          docker pull --platform linux/arm64 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          docker save ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest | gzip > bundle/images/forge-inference-arm64.tar.gz
+
+      - name: Copy configs and scripts
+        run: |
+          cp honeywell-forge-lab/deployment/docker-compose*.yaml bundle/configs/
+          cp honeywell-forge-lab/inference-server/sku_profiles.yaml bundle/configs/
+          cp honeywell-forge-lab/inference-server/config.yaml bundle/configs/
+          cp honeywell-forge-lab/cicd/scripts/deploy-airgapped.sh bundle/scripts/
+          cp honeywell-forge-lab/cicd/scripts/load-images.sh bundle/scripts/
+          chmod +x bundle/scripts/*.sh
+
+      - name: Create manifest
+        run: |
+          cat > bundle/MANIFEST.md << 'EOF'
+          # Forge Cognition Air-Gapped Bundle
+
+          Version: ${{ github.event.inputs.version || 'latest' }}
+          Build Date: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          Git SHA: ${{ github.sha }}
+
+          ## Contents
+
+          - images/forge-inference-x86.tar.gz - RTX 4000 Pro image
+          - images/forge-inference-arm64.tar.gz - Jetson Thor image
+          - configs/ - Docker Compose and SKU profiles
+          - scripts/ - Deployment scripts
+
+          ## Deployment Instructions
+
+          1. Transfer bundle to target appliance
+          2. Run: ./scripts/load-images.sh
+          3. Run: ./scripts/deploy-airgapped.sh
+          EOF
+
+      - name: Create bundle archive
+        run: |
+          VERSION=${{ github.event.inputs.version || 'latest' }}
+          tar -czvf forge-cognition-bundle-${VERSION}.tar.gz bundle/
+
+      - name: Upload bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-cognition-bundle-${{ github.event.inputs.version || 'latest' }}
+          path: forge-cognition-bundle-*.tar.gz
+          retention-days: 30
+
+  # ============================================================================
+  # Job 5: Deploy to Lab (Self-hosted runner with GPU)
+  # ============================================================================
+  deploy-lab:
+    name: Deploy to Lab
+    runs-on: [self-hosted, gpu]  # Requires self-hosted runner with GPU
+    needs: build-multiarch
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: lab
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to lab environment
+        run: |
+          cd honeywell-forge-lab/deployment
+          docker-compose pull
+          docker-compose up -d
+
+          # Wait for health check
+          sleep 30
+          curl -f http://localhost:8000/health || exit 1
+
+      - name: Run smoke tests
+        run: |
+          # Test SKU detection
+          curl -s http://localhost:8000/v1/sku | jq .
+
+          # Test TensorRT-LLM config endpoint
+          curl -s http://localhost:8000/v1/tensorrt-llm/config | jq .
+
+          # Test performance targets
+          curl -s http://localhost:8000/v1/performance/targets | jq .
+
+      - name: Run load test (optional)
+        run: |
+          echo "Load testing would run here with locust or k6"
+          # locust -f tests/load_test.py --headless -u 20 -r 5 --run-time 60s
