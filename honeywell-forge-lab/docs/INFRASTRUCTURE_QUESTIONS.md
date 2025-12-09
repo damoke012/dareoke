@@ -28,7 +28,7 @@ The following items were listed as **Honeywell dependencies** - these are blocki
 
 ## G. Deployment Infrastructure & DevOps
 
-1. **Container Runtime:** What container runtime is on the appliances today - Docker, containerd, Podman? Is nvidia-container-toolkit already configured?
+1. **Container Runtime:** What container runtime is on the appliances today - Docker, containerd, or Podman?
 2. **Container Registry:** Is there an existing container registry (Harbor, Artifactory, JFrog)? For air-gapped sites, how are container images currently distributed to devices?
 3. **Model Storage & Versioning:** How are TensorRT model engines stored and versioned today - model registry, object storage, or files on disk? What's the approximate size per model version?
 4. **GPU Stack Versions:** What NVIDIA driver, CUDA, and TensorRT versions are currently installed on each SKU (Jetson Thor / RTX 4000)?
@@ -99,7 +99,7 @@ The following items were listed as **Honeywell dependencies** - these are blocki
 Hi @Nishant - As I start designing the deployment infrastructure, a few questions that will help shape the solution:
 
 **Deployment Infrastructure:**
-1. What container runtime is on the appliances today - Docker, containerd, Podman? Is nvidia-container-toolkit configured?
+1. What container runtime is on the appliances today - Docker, containerd, or Podman?
 2. Is there an existing container registry? For air-gapped sites, how are images currently distributed?
 3. How are TensorRT model engines stored and versioned - registry, object storage, or files on disk? Approximate size per model?
 4. What NVIDIA driver, CUDA, and TensorRT versions are installed on each SKU (Thor / RTX)?
@@ -153,7 +153,7 @@ These answers will help me design the deployment automation and align with your 
 
 | Question | Impact on Design |
 |----------|------------------|
-| Container runtime | Deployment scripts differ for Docker vs containerd |
+| Container runtime | Deployment scripts differ for Docker vs containerd vs Podman |
 | Registry | Affects CI/CD pipeline and air-gapped distribution |
 | Model storage | Volume mounts, storage sizing, rollback strategy |
 | GPU stack versions | Container base image compatibility |
