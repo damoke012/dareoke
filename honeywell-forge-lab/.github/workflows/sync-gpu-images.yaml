@@ -1,8 +1,9 @@
 # Sync GPU Operator Images for Airgapped Deployments
 #
 # This workflow downloads all NVIDIA GPU Operator images and:
-#   1. Creates a GitHub Release with tar files
-#   2. Optionally pushes to a private registry
+#   1. Creates a GitHub Release with a single compressed archive
+#   2. Includes loader script for easy import on airgapped K3s nodes
+#   3. Supports ArgoCD/GitOps deployments in airgapped environments
 #
 # The release artifacts can be downloaded and imported on airgapped K3s nodes.
 
@@ -18,7 +19,15 @@ on:
       driver_version:
         description: 'NVIDIA driver version'
         required: false
-        default: '580.105.08'
+        default: '535.230.02'
+      ubuntu_version:
+        description: 'Ubuntu version for driver'
+        required: false
+        default: 'ubuntu20.04'
+        type: choice
+        options:
+          - 'ubuntu20.04'
+          - 'ubuntu22.04'
       create_release:
         description: 'Create GitHub Release with images'
         required: false
@@ -33,7 +42,8 @@ on:
 
 env:
   GPU_OPERATOR_VERSION: ${{ github.event.inputs.gpu_operator_version || 'v25.10.1' }}
-  DRIVER_VERSION: ${{ github.event.inputs.driver_version || '580.105.08' }}
+  DRIVER_VERSION: ${{ github.event.inputs.driver_version || '535.230.02' }}
+  UBUNTU_VERSION: ${{ github.event.inputs.ubuntu_version || 'ubuntu20.04' }}
 
 jobs:
   sync-images:
@@ -49,100 +59,249 @@ jobs:
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
           df -h
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y podman skopeo
+          sudo apt-get install -y podman skopeo pigz
 
-      - name: Define images to sync
+      - name: Create images list
         id: images
         run: |
-          cat > /tmp/images.txt << 'EOF'
+          mkdir -p gpu-images
+
+          cat > gpu-images/images.txt << EOF
           nvcr.io/nvidia/gpu-operator:${{ env.GPU_OPERATOR_VERSION }}
           nvcr.io/nvidia/cloud-native/k8s-driver-manager:v0.9.1
-          nvcr.io/nvidia/driver:${{ env.DRIVER_VERSION }}-ubuntu20.04
+          nvcr.io/nvidia/driver:${{ env.DRIVER_VERSION }}-${{ env.UBUNTU_VERSION }}
           nvcr.io/nvidia/k8s/container-toolkit:v1.18.1
           nvcr.io/nvidia/k8s-device-plugin:v0.18.1
           nvcr.io/nvidia/k8s/dcgm-exporter:4.4.2-4.7.0-distroless
+          nvcr.io/nvidia/k8s/gpu-feature-discovery:v0.18.1
           registry.k8s.io/nfd/node-feature-discovery:v0.18.2
           nvcr.io/nvidia/cuda:12.2.0-base-ubuntu22.04
           EOF
-          echo "count=$(wc -l < /tmp/images.txt)" >> $GITHUB_OUTPUT
+
+          echo "count=$(wc -l < gpu-images/images.txt)" >> $GITHUB_OUTPUT
+          cat gpu-images/images.txt
 
       - name: Pull all images
         run: |
-          mkdir -p gpu-images
-          while IFS= read -r img; do
+          while IFS= read -r img || [[ -n "$img" ]]; do
+            img=$(echo "$img" | tr -d '[:space:]')
+            [[ -z "$img" ]] && continue
+            echo "========================================"
             echo "Pulling: $img"
-            podman pull "$img" || echo "Failed: $img"
-          done < /tmp/images.txt
+            echo "========================================"
+            podman pull "$img" || echo "WARNING: Failed to pull $img"
+          done < gpu-images/images.txt
 
-      - name: Save images to tar files
+      - name: Save images individually
         run: |
-          # Save each image individually (more reliable for large images)
-          while IFS= read -r img; do
-            name=$(echo "$img" | sed 's|.*/||' | sed 's/:/-/g')
-            echo "Saving: $img -> gpu-images/${name}.tar"
-            podman save -o "gpu-images/${name}.tar" "$img" || echo "Failed: $img"
-          done < /tmp/images.txt
+          while IFS= read -r img || [[ -n "$img" ]]; do
+            img=$(echo "$img" | tr -d '[:space:]')
+            [[ -z "$img" ]] && continue
+
+            # Create safe filename
+            name=$(echo "$img" | sed 's|/|_|g' | sed 's/:/-/g')
+            tar_file="gpu-images/${name}.tar"
+
+            echo "Saving: $img -> $tar_file"
+            podman save -o "$tar_file" "$img" || echo "WARNING: Failed to save $img"
+          done < gpu-images/images.txt
+
+      - name: Create loader script
+        run: |
+          cat > gpu-images/load-gpu-images.sh << 'SCRIPT'
+          #!/bin/bash
+          # =============================================================================
+          # Load GPU Operator Images into K3s
+          # =============================================================================
+          # Usage: ./load-gpu-images.sh [tar-directory]
+          #
+          # This script imports all GPU Operator images into K3s containerd.
+          # Run this on each K3s node that needs GPU support.
+          # =============================================================================
+
+          set -e
+
+          TAR_DIR="${1:-.}"
+
+          echo "=========================================="
+          echo "Loading GPU Operator Images"
+          echo "=========================================="
+          echo "Source directory: $TAR_DIR"
+          echo ""
+
+          # Check if running on K3s node
+          if ! command -v k3s &> /dev/null; then
+              echo "ERROR: k3s not found. Run this on a K3s node."
+              exit 1
+          fi
+
+          # Import each tar file
+          for tar_file in "$TAR_DIR"/*.tar; do
+              if [[ -f "$tar_file" ]]; then
+                  echo "Importing: $(basename "$tar_file")"
+                  sudo k3s ctr images import "$tar_file" || echo "WARNING: Failed to import $tar_file"
+              fi
+          done
+
+          echo ""
+          echo "=========================================="
+          echo "Imported Images:"
+          echo "=========================================="
+          sudo k3s ctr images list | grep -E "nvidia|nfd" | head -20
+
+          echo ""
+          echo "Done! GPU Operator images are now available."
+          SCRIPT
+
+          chmod +x gpu-images/load-gpu-images.sh
+
+      - name: Create checksums and manifest
+        run: |
+          cd gpu-images
 
           # Create checksums
-          cd gpu-images
           sha256sum *.tar > checksums.sha256
 
           # Create manifest
-          cat > manifest.md << EOF
-          # GPU Operator Images
+          cat > README.md << EOF
+          # GPU Operator Images for Airgapped Deployment
 
-          **GPU Operator Version:** ${{ env.GPU_OPERATOR_VERSION }}
-          **Driver Version:** ${{ env.DRIVER_VERSION }}
-          **Generated:** $(date)
+          | Setting | Value |
+          |---------|-------|
+          | GPU Operator Version | ${{ env.GPU_OPERATOR_VERSION }} |
+          | Driver Version | ${{ env.DRIVER_VERSION }} |
+          | Ubuntu Version | ${{ env.UBUNTU_VERSION }} |
+          | Generated | $(date -u +"%Y-%m-%d %H:%M:%S UTC") |
 
           ## Images Included
 
-          $(cat /tmp/images.txt | sed 's/^/- /')
+          \`\`\`
+          $(cat images.txt)
+          \`\`\`
 
-          ## Usage on Airgapped K3s Node
+          ## Quick Start
+
+          ### 1. Download and Extract
 
           \`\`\`bash
-          # Download all tar files to /tmp/gpu-images
+          # Download the release archive
+          wget https://github.com/${{ github.repository }}/releases/download/gpu-images-${{ env.GPU_OPERATOR_VERSION }}/gpu-images-${{ env.GPU_OPERATOR_VERSION }}.tar.gz
 
-          # Import into K3s
-          for f in /tmp/gpu-images/*.tar; do
-            sudo k3s ctr images import "\$f"
-          done
+          # Extract
+          tar -xzf gpu-images-${{ env.GPU_OPERATOR_VERSION }}.tar.gz
+          cd gpu-images
+          \`\`\`
 
-          # Verify
+          ### 2. Transfer to Airgapped Environment
+
+          \`\`\`bash
+          # Copy to your jump host or airgapped node
+          scp -r gpu-images/ user@jumphost:/tmp/
+
+          # From jump host to K3s node
+          scp -r /tmp/gpu-images/ dare@192.168.22.81:/tmp/
+          \`\`\`
+
+          ### 3. Load Images on K3s Node
+
+          \`\`\`bash
+          # SSH to K3s node
+          ssh dare@192.168.22.81
+
+          # Run the loader script
+          cd /tmp/gpu-images
+          ./load-gpu-images.sh
+
+          # Or manually:
+          for f in *.tar; do sudo k3s ctr images import "\$f"; done
+          \`\`\`
+
+          ### 4. Verify Images
+
+          \`\`\`bash
           sudo k3s ctr images list | grep nvidia
+          \`\`\`
+
+          ## For ArgoCD/GitOps
+
+          If using ArgoCD in an airgapped environment:
+
+          1. Load images on all K3s nodes first
+          2. Install GPU Operator with \`driver.enabled=false\` if using pre-installed drivers
+          3. Or use the containerized driver with images pre-loaded
+
+          \`\`\`bash
+          helm upgrade --install gpu-operator nvidia/gpu-operator \\
+            --namespace gpu-operator \\
+            --create-namespace \\
+            --set driver.version=${{ env.DRIVER_VERSION }}
+          \`\`\`
+
+          ## Checksums
+
+          Verify integrity with:
+          \`\`\`bash
+          sha256sum -c checksums.sha256
           \`\`\`
           EOF
 
-      - name: List saved images
+      - name: Create compressed archive
         run: |
-          echo "=== Saved Images ==="
+          echo "Creating compressed archive..."
+          tar -cvf - gpu-images/ | pigz -9 > gpu-images-${{ env.GPU_OPERATOR_VERSION }}.tar.gz
+
+          echo ""
+          echo "Archive created:"
+          ls -lh gpu-images-${{ env.GPU_OPERATOR_VERSION }}.tar.gz
+
+          # Also create sha256 for the archive
+          sha256sum gpu-images-${{ env.GPU_OPERATOR_VERSION }}.tar.gz > gpu-images-${{ env.GPU_OPERATOR_VERSION }}.tar.gz.sha256
+
+      - name: List all files
+        run: |
+          echo "=== Individual Image Files ==="
           ls -lh gpu-images/
           echo ""
           echo "=== Total Size ==="
           du -sh gpu-images/
+          echo ""
+          echo "=== Compressed Archive ==="
+          ls -lh gpu-images-*.tar.gz*
 
-      - name: Upload artifacts
+      - name: Upload individual artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: gpu-operator-images-${{ env.GPU_OPERATOR_VERSION }}
+          name: gpu-images-individual-${{ env.GPU_OPERATOR_VERSION }}
           path: gpu-images/
           retention-days: 30
 
+      - name: Upload compressed archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-images-archive-${{ env.GPU_OPERATOR_VERSION }}
+          path: |
+            gpu-images-${{ env.GPU_OPERATOR_VERSION }}.tar.gz
+            gpu-images-${{ env.GPU_OPERATOR_VERSION }}.tar.gz.sha256
+          retention-days: 30
+
       - name: Create Release
-        if: github.event.inputs.create_release == 'true'
+        if: github.event.inputs.create_release == 'true' || github.event_name == 'schedule'
         uses: softprops/action-gh-release@v1
         with:
           tag_name: gpu-images-${{ env.GPU_OPERATOR_VERSION }}
           name: GPU Operator Images ${{ env.GPU_OPERATOR_VERSION }}
-          body_path: gpu-images/manifest.md
+          body_path: gpu-images/README.md
           files: |
-            gpu-images/*.tar
+            gpu-images-${{ env.GPU_OPERATOR_VERSION }}.tar.gz
+            gpu-images-${{ env.GPU_OPERATOR_VERSION }}.tar.gz.sha256
+            gpu-images/load-gpu-images.sh
+            gpu-images/images.txt
             gpu-images/checksums.sha256
           draft: false
           prerelease: false
@@ -151,49 +310,24 @@ jobs:
 
       - name: Summary
         run: |
-          echo "## GPU Images Synced!" >> $GITHUB_STEP_SUMMARY
+          echo "## GPU Images Synced Successfully! :rocket:" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Configuration" >> $GITHUB_STEP_SUMMARY
           echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| GPU Operator | ${{ env.GPU_OPERATOR_VERSION }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Driver | ${{ env.DRIVER_VERSION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| GPU Operator | \`${{ env.GPU_OPERATOR_VERSION }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Driver | \`${{ env.DRIVER_VERSION }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Ubuntu | \`${{ env.UBUNTU_VERSION }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Images | ${{ steps.images.outputs.count }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Download" >> $GITHUB_STEP_SUMMARY
-          echo "Download the artifacts or release to transfer to airgapped environment." >> $GITHUB_STEP_SUMMARY
-
-  # Optional: Push to private registry
-  push-to-registry:
-    name: Push to Private Registry
-    runs-on: ubuntu-latest
-    needs: sync-images
-    if: github.event.inputs.registry_url != ''
-
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: gpu-operator-images-${{ env.GPU_OPERATOR_VERSION }}
-          path: gpu-images/
-
-      - name: Push to registry
-        if: env.REGISTRY_URL != ''
-        env:
-          REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
-          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
-          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
-        run: |
-          # Login
-          echo "$REGISTRY_PASSWORD" | podman login "${REGISTRY_URL%%/*}" -u "$REGISTRY_USER" --password-stdin
-
-          # Load and push each image
-          for tar_file in gpu-images/*.tar; do
-            podman load -i "$tar_file"
-          done
-
-          # Tag and push
-          for img in $(podman images --format "{{.Repository}}:{{.Tag}}" | grep -E "nvcr.io|registry.k8s.io"); do
-            dst="${REGISTRY_URL}/$(basename $img)"
-            podman tag "$img" "$dst"
-            podman push "$dst" --tls-verify=false
-          done
+          echo "### Download Options" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "1. **GitHub Release**: Download \`gpu-images-${{ env.GPU_OPERATOR_VERSION }}.tar.gz\`" >> $GITHUB_STEP_SUMMARY
+          echo "2. **Artifacts**: Download from the Actions artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Usage" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "# Extract and load on K3s node" >> $GITHUB_STEP_SUMMARY
+          echo "tar -xzf gpu-images-${{ env.GPU_OPERATOR_VERSION }}.tar.gz" >> $GITHUB_STEP_SUMMARY
+          echo "cd gpu-images && ./load-gpu-images.sh" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

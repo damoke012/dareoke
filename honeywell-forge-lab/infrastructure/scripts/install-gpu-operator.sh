@@ -40,7 +40,8 @@ VM_USER="${VM_USER:-dare}"
 VM_PASSWORD="${VM_PASSWORD:-}"
 GPU_TIME_SLICES="${GPU_TIME_SLICES:-4}"
 SKIP_DRIVER="${SKIP_DRIVER:-false}"
-GPU_OPERATOR_VERSION="${GPU_OPERATOR_VERSION:-v23.9.1}"
+GPU_OPERATOR_VERSION="${GPU_OPERATOR_VERSION:-v25.10.1}"
+DRIVER_VERSION="${DRIVER_VERSION:-535.230.02}"
 HELM_VERSION="${HELM_VERSION:-v3.13.2}"
 
 # Colors
@@ -173,6 +174,10 @@ install_gpu_operator() {
     if [[ "${SKIP_DRIVER}" == "true" ]]; then
         log_info "Skipping NVIDIA driver installation (using pre-installed drivers)"
         helm_args+=" --set driver.enabled=false"
+    else
+        # Configure driver version
+        helm_args+=" --set driver.version=${DRIVER_VERSION}"
+        helm_args+=" --set driver.repository=nvcr.io/nvidia"
     fi
 
     # K3s specific settings
