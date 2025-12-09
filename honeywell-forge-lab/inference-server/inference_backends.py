@@ -1,17 +1,20 @@
 """
 Honeywell Forge Cognition - Inference Backend Abstraction
-Supports multiple backends for flexibility:
-  1. SimulatedBackend - No GPU, for API testing
-  2. VLLMBackend - Real inference with vLLM (recommended for prototype)
-  3. TensorRTLLMBackend - Production optimized (requires model conversion)
-  4. OpenAICompatibleBackend - For testing with any OpenAI-compatible API
+
+IMPORTANT: Quantiphi confirmed TensorRT-LLM is the ONLY backend (Dec 9, 2024)
+vLLM is NOT being used for this project.
+
+Backends:
+  1. SimulatedBackend - No GPU, for API testing and CI/CD
+  2. TensorRTLLMBackend - Production backend (TensorRT-LLM)
+  3. OpenAICompatibleBackend - For testing with Triton Inference Server
 
 Usage:
     # Auto-select based on environment
     backend = create_inference_backend()
 
     # Force specific backend
-    backend = create_inference_backend(backend_type="vllm")
+    backend = create_inference_backend(backend_type="tensorrt")
 """
 
 import asyncio

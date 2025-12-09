@@ -208,26 +208,17 @@ tesla_p40:
 # ============================================================================
 # Inference Backend Configuration
 # ============================================================================
-# TensorRT-LLM is primary, VLLM is fallback if model not compatible
+# TensorRT-LLM ONLY - confirmed by Quantiphi (Dec 9, 2024)
+# vLLM is NOT being used for this project
 inference_backends:
   primary:
     name: "tensorrt-llm"
     description: "NVIDIA TensorRT-LLM - optimized for NVIDIA GPUs"
     supported: true
-    notes: "Expected to be compatible per Honeywell model requirements"
+    notes: "Confirmed backend per Quantiphi - no vLLM fallback"
 
-  fallback:
-    name: "vllm"
-    description: "vLLM - PagedAttention-based inference"
-    supported: true
-    notes: "Fallback if TensorRT-LLM not compatible with Honeywell model"
-    config:
-      tensor_parallel_size: 1
-      max_model_len: 20480      # 20k tokens per Honeywell benchmarks
-      gpu_memory_utilization: 0.85
-      enforce_eager: false
-      trust_remote_code: true
-      dtype: "auto"             # Let vLLM choose based on model
+  # vLLM removed - Quantiphi confirmed TensorRT-LLM only
+  # If TensorRT-LLM has issues, escalate to Honeywell/Quantiphi
 
 # ============================================================================
 # Thermal Throttling Configuration

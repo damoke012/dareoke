@@ -63,24 +63,27 @@ services:
 
 ---
 
-## Option 2: Memory Limits via vLLM/TensorRT-LLM
+## Option 2: Memory Limits via TensorRT-LLM
 
-**How it works:** Configure inference engine to use only a portion of GPU memory.
+**How it works:** Configure TensorRT-LLM to use only a portion of GPU memory.
+
+> **Note:** Quantiphi confirmed TensorRT-LLM is the ONLY backend (Dec 9, 2024). vLLM is not used.
 
 ```yaml
 # sku_profiles.yaml
 jetson_thor:
   tensorrt_llm:
     gpu_memory_utilization: 0.70  # Use only 70% of GPU for LLM
+    kv_cache_free_gpu_memory_fraction: 0.70
 ```
 
 ```python
-# vLLM configuration
-from vllm import LLM
-llm = LLM(
-    model="...",
-    gpu_memory_utilization=0.70,  # Leave 30% for other services
-)
+# TensorRT-LLM configuration (via Triton or direct)
+# Memory allocation is controlled at engine build time and runtime config
+config = {
+    "kv_cache_free_gpu_memory_fraction": 0.70,  # Leave 30% for other services
+    "enable_chunked_context": True,
+}
 ```
 
 **Pros:**
