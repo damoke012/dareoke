@@ -145,7 +145,23 @@ Hi @Nishant - As I start designing the deployment infrastructure, a few question
 32. Is token streaming used, or batch completion only?
 
 These answers will help me design the deployment automation and align with your existing practices.
+
+**Source Control & Collaboration:**
+33. What Git platform do you use - GitHub, GitLab, Azure DevOps, Bitbucket?
+34. Should we create a shared repo for this project, or work in an existing repo?
+35. What's your branch naming convention and PR review process?
+36. Do developers need individual test branches/environments?
 ```
+
+---
+
+## N. Source Control & Developer Collaboration
+
+33. **Git Platform:** What Git platform do you use - GitHub, GitLab, Azure DevOps, Bitbucket?
+34. **Repo Setup:** Should we create a new shared repo for this project, or integrate into an existing repo?
+35. **Branch Strategy:** What's your branch naming convention - GitFlow, trunk-based, or custom?
+36. **Code Review:** What's your PR review process - 1 approver, 2 approvers, specific reviewers required?
+37. **Developer Environments:** Do developers need individual test branches/namespaces for isolated testing?
 
 ---
 
@@ -172,3 +188,7 @@ These answers will help me design the deployment automation and align with your 
 | Resource contention | Determines graceful degradation strategy |
 | JetPack version | Must match container base image (L4T) |
 | Tegra verification | Avoids deployment surprises on ARM64 |
+| Git platform | Determines CI/CD integration and workflow |
+| Repo setup | Single source of truth vs distributed development |
+| Branch strategy | Affects merge conflicts and release process |
+| Developer environments | Isolated testing prevents stepping on each other |
