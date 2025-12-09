@@ -71,6 +71,28 @@ The following items were listed as **Honeywell dependencies** - these are blocki
 
 ---
 
+## L. CI/CD & Production Deployment (Critical for alignment)
+
+21. **Current CI/CD Platform:** What CI/CD platform is used today - Jenkins, GitHub Actions, GitLab CI, Azure DevOps, or something else?
+22. **Build Pipeline:** How are container images built today - locally, in CI/CD, or both? What triggers a build (commit, tag, manual)?
+23. **Testing in Pipeline:** What tests run in CI/CD today - unit tests, integration tests, model validation, GPU tests?
+24. **Deployment Method:** How are updates deployed to edge appliances today - manual push, pull-based (ArgoCD/Flux), or scripts?
+25. **Rollback Strategy:** How do you rollback a bad deployment - previous container version, config revert, or full reinstall?
+26. **Secrets Management:** How are API keys, credentials, and model access tokens managed - environment variables, Vault, K8s secrets?
+
+---
+
+## M. Current Inference Stack (Critical for optimization)
+
+27. **Inference Backend Today:** What runs the LLM today - raw HuggingFace Transformers, vLLM, TensorRT-LLM, Triton, or something else?
+28. **Model Format:** What format is the model in - HuggingFace checkpoint, ONNX, TensorRT engine, or other?
+29. **Model Loading:** How is the model loaded - downloaded at startup, baked into container, or mounted from volume?
+30. **API Structure:** Does the current API follow OpenAI-compatible format, or is it custom? Can you share the API spec/Swagger?
+31. **Batching Today:** Is request batching enabled today? If so, what batch sizes are used?
+32. **Streaming:** Is token streaming used for responses, or batch completion only?
+
+---
+
 ## Copy-Paste Ready Message
 
 ```
@@ -106,7 +128,23 @@ Hi @Nishant - As I start designing the deployment infrastructure, a few question
 19. What JetPack version is on the Thor devices?
 20. Has TensorRT-LLM been verified on Tegra/L4T, or is that our testing scope?
 
-These answers will help me design the deployment automation and resource isolation strategy.
+**CI/CD & Production (Critical for alignment):**
+21. What CI/CD platform is used today - Jenkins, GitHub Actions, GitLab, Azure DevOps?
+22. How are container images built - locally, in CI/CD, or both? What triggers a build?
+23. What tests run in CI/CD - unit tests, integration tests, GPU tests?
+24. How are updates deployed to appliances - push, pull-based (ArgoCD), or scripts?
+25. How do you rollback a bad deployment?
+26. How are secrets/credentials managed?
+
+**Current Inference Stack (Critical for optimization):**
+27. What runs the LLM today - HuggingFace, vLLM, TensorRT-LLM, Triton?
+28. What format is the model in - HuggingFace checkpoint, ONNX, TensorRT engine?
+29. How is the model loaded - downloaded at startup, baked into container, or mounted?
+30. Does the API follow OpenAI format, or custom? Can you share the spec?
+31. Is request batching enabled? What batch sizes?
+32. Is token streaming used, or batch completion only?
+
+These answers will help me design the deployment automation and align with your existing practices.
 ```
 
 ---
