@@ -1,0 +1,71 @@
+# Honeywell Forge Cognition - Network Policies
+# Security controls for edge deployment
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: inference-server-policy
+  namespace: forge-cognition
+spec:
+  podSelector:
+    matchLabels:
+      app: inference-server
+  policyTypes:
+  - Ingress
+  - Egress
+
+  ingress:
+  # Allow traffic from within the namespace
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: forge-cognition
+    ports:
+    - protocol: TCP
+      port: 8000
+
+  # Allow traffic from monitoring namespace
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+    ports:
+    - protocol: TCP
+      port: 8000  # Metrics endpoint
+
+  # Allow external traffic via NodePort (edge device access)
+  - from: []
+    ports:
+    - protocol: TCP
+      port: 8000
+
+  egress:
+  # Allow DNS
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+
+  # Allow traffic to model storage (if external)
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80
+
+---
+# Default deny for namespace (security baseline)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: forge-cognition
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress

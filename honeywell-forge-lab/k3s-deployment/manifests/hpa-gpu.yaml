@@ -1,0 +1,78 @@
+# Honeywell Forge Cognition - GPU-Aware Horizontal Pod Autoscaler
+# Note: HPA for GPU workloads is limited since GPU memory isn't a standard metric
+# This uses custom metrics from DCGM exporter via Prometheus adapter
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: inference-server-hpa
+  namespace: forge-cognition
+  labels:
+    app: inference-server
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: inference-server
+
+  # For single-node edge: 1-2 replicas (limited by GPU slices)
+  minReplicas: 1
+  maxReplicas: 2  # Limited by available GPU time-slices
+
+  metrics:
+  # Scale based on active sessions (custom metric)
+  - type: Pods
+    pods:
+      metric:
+        name: forge_active_sessions
+      target:
+        type: AverageValue
+        averageValue: "8"  # Scale up when avg sessions > 8
+
+  # Scale based on request queue depth
+  - type: Pods
+    pods:
+      metric:
+        name: forge_request_queue_depth
+      target:
+        type: AverageValue
+        averageValue: "5"  # Scale up when queue > 5
+
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300  # Wait 5min before scaling down
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 300
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 60
+
+---
+# Vertical Pod Autoscaler (optional - for memory tuning)
+# Requires VPA controller to be installed
+# apiVersion: autoscaling.k8s.io/v1
+# kind: VerticalPodAutoscaler
+# metadata:
+#   name: inference-server-vpa
+#   namespace: forge-cognition
+# spec:
+#   targetRef:
+#     apiVersion: apps/v1
+#     kind: Deployment
+#     name: inference-server
+#   updatePolicy:
+#     updateMode: "Off"  # Only recommend, don't auto-apply
+#   resourcePolicy:
+#     containerPolicies:
+#     - containerName: inference
+#       minAllowed:
+#         memory: "4Gi"
+#         cpu: "1"
+#       maxAllowed:
+#         memory: "32Gi"
+#         cpu: "8"

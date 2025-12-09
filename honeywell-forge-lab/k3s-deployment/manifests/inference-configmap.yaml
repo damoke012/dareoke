@@ -1,0 +1,93 @@
+# Honeywell Forge Cognition - Inference Configuration
+# SKU-specific settings loaded at runtime
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inference-config
+  namespace: forge-cognition
+  labels:
+    app: inference-server
+data:
+  # TensorRT-LLM settings
+  max_batch_size: "8"
+  max_concurrent_sessions: "10"
+  gpu_memory_utilization: "0.85"
+
+  # Model configuration
+  model_name: "honeywell-forge-9b"
+  max_model_len: "20480"
+
+  # KV Cache settings
+  kv_cache_dtype: "fp8"
+  kv_cache_free_gpu_memory_fraction: "0.85"
+
+  # Streaming
+  streaming_enabled: "true"
+  streaming_interval: "1"
+
+  # Scheduling
+  scheduler_policy: "max_utilization"
+  enable_kv_cache_reuse: "true"
+
+  # Batching
+  enable_chunked_context: "true"
+  max_num_tokens: "4096"
+
+  # Timeouts
+  request_timeout_seconds: "120"
+  model_load_timeout_seconds: "600"
+
+---
+# SKU-specific overrides (Jetson Thor)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inference-config-jetson-thor
+  namespace: forge-cognition
+  labels:
+    app: inference-server
+    sku: jetson-thor
+data:
+  max_batch_size: "16"
+  max_concurrent_sessions: "20"
+  gpu_memory_utilization: "0.90"
+  kv_cache_dtype: "fp8"
+  max_num_tokens: "8192"
+  scheduler_policy: "max_utilization"
+
+---
+# SKU-specific overrides (RTX Pro 4000)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inference-config-rtx-pro
+  namespace: forge-cognition
+  labels:
+    app: inference-server
+    sku: rtx-pro-4000
+data:
+  max_batch_size: "8"
+  max_concurrent_sessions: "8"
+  gpu_memory_utilization: "0.85"
+  kv_cache_dtype: "fp8"
+  max_num_tokens: "4096"
+  scheduler_policy: "guaranteed_no_evict"
+
+---
+# SKU-specific overrides (Tesla P40 - Lab)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inference-config-tesla-p40
+  namespace: forge-cognition
+  labels:
+    app: inference-server
+    sku: tesla-p40
+data:
+  max_batch_size: "8"
+  max_concurrent_sessions: "10"
+  gpu_memory_utilization: "0.85"
+  kv_cache_dtype: "fp16"  # No FP8 on Pascal!
+  max_num_tokens: "4096"
+  scheduler_policy: "guaranteed_no_evict"

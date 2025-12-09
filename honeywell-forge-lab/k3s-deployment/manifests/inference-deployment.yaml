@@ -1,0 +1,194 @@
+# Honeywell Forge Cognition - Inference Server Deployment
+# Deploys TensorRT-LLM based inference with GPU time-slicing
+#
+# Features:
+#   - GPU time-slicing (requests 1 of N virtual GPUs)
+#   - Liveness and readiness probes for failover
+#   - Resource limits for predictable scheduling
+#   - Anti-affinity to spread replicas (if multi-node)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference-server
+  namespace: forge-cognition
+  labels:
+    app: inference-server
+    component: llm
+spec:
+  replicas: 1  # Single replica per edge device (scale via time-slicing)
+  selector:
+    matchLabels:
+      app: inference-server
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0        # Don't exceed GPU capacity
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: inference-server
+        component: llm
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Use NVIDIA runtime
+      runtimeClassName: nvidia
+
+      # Don't restart too quickly on failure
+      restartPolicy: Always
+
+      # Termination grace period for model unload
+      terminationGracePeriodSeconds: 60
+
+      containers:
+      - name: inference
+        image: forge/inference-server:latest
+        imagePullPolicy: IfNotPresent
+
+        ports:
+        - name: http
+          containerPort: 8000
+          protocol: TCP
+        - name: metrics
+          containerPort: 8000
+          protocol: TCP
+
+        env:
+        # Backend configuration
+        - name: FORGE_INFERENCE_BACKEND
+          value: "tensorrt"
+        - name: FORGE_SKU_AUTO_DETECT
+          value: "true"
+
+        # TensorRT-LLM settings (from ConfigMap)
+        - name: FORGE_MODEL_PATH
+          value: "/models/engine"
+        - name: FORGE_MAX_BATCH_SIZE
+          valueFrom:
+            configMapKeyRef:
+              name: inference-config
+              key: max_batch_size
+        - name: FORGE_MAX_CONCURRENT_SESSIONS
+          valueFrom:
+            configMapKeyRef:
+              name: inference-config
+              key: max_concurrent_sessions
+
+        # GPU memory settings
+        - name: FORGE_GPU_MEMORY_UTILIZATION
+          valueFrom:
+            configMapKeyRef:
+              name: inference-config
+              key: gpu_memory_utilization
+
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2"
+            nvidia.com/gpu: "1"  # Request 1 time-slice
+          limits:
+            memory: "16Gi"
+            cpu: "4"
+            nvidia.com/gpu: "1"
+
+        volumeMounts:
+        - name: model-storage
+          mountPath: /models
+          readOnly: true
+        - name: config
+          mountPath: /app/config
+          readOnly: true
+
+        # Health checks for failover
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 120  # Model loading takes time
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+        # Startup probe for slow model loading
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30  # 5 minutes max startup
+
+      volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: model-storage
+      - name: config
+        configMap:
+          name: inference-config
+
+      # Node selection (if specific GPU nodes)
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+
+      # Tolerations for GPU nodes
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+
+---
+# Service for inference server
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-server
+  namespace: forge-cognition
+  labels:
+    app: inference-server
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+    protocol: TCP
+  - name: metrics
+    port: 9090
+    targetPort: 8000
+    protocol: TCP
+  selector:
+    app: inference-server
+
+---
+# NodePort service for external access (edge device)
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-server-external
+  namespace: forge-cognition
+  labels:
+    app: inference-server
+spec:
+  type: NodePort
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+    nodePort: 30080
+    protocol: TCP
+  selector:
+    app: inference-server

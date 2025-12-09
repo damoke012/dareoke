@@ -1,0 +1,58 @@
+# Honeywell Forge Cognition - Resource Quotas
+# Prevents resource exhaustion on edge devices
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: forge-cognition-quota
+  namespace: forge-cognition
+spec:
+  hard:
+    # GPU limits (based on time-slicing config)
+    requests.nvidia.com/gpu: "4"  # Max 4 GPU slices
+    limits.nvidia.com/gpu: "4"
+
+    # Memory limits
+    requests.memory: "32Gi"
+    limits.memory: "64Gi"
+
+    # CPU limits
+    requests.cpu: "8"
+    limits.cpu: "16"
+
+    # Pod limits
+    pods: "10"
+
+    # PVC limits
+    persistentvolumeclaims: "5"
+    requests.storage: "200Gi"
+
+---
+# Limit ranges for individual pods
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: forge-cognition-limits
+  namespace: forge-cognition
+spec:
+  limits:
+  # Default limits for containers
+  - default:
+      memory: "8Gi"
+      cpu: "2"
+    defaultRequest:
+      memory: "2Gi"
+      cpu: "500m"
+    type: Container
+
+  # GPU container limits
+  - max:
+      nvidia.com/gpu: "2"  # Max 2 GPU slices per container
+    type: Container
+
+  # PVC size limits
+  - max:
+      storage: "100Gi"
+    min:
+      storage: "1Gi"
+    type: PersistentVolumeClaim

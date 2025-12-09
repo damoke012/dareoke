@@ -1,0 +1,45 @@
+# Honeywell Forge Cognition - Priority Classes
+# Ensures LLM inference gets priority over other workloads
+---
+# Highest priority: LLM Inference
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: forge-llm-critical
+globalDefault: false
+value: 1000000
+preemptionPolicy: PreemptLowerPriority
+description: "Critical priority for LLM inference - preempts other workloads"
+
+---
+# High priority: Supporting services (Milvus, embeddings)
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: forge-high
+globalDefault: false
+value: 100000
+preemptionPolicy: PreemptLowerPriority
+description: "High priority for supporting services"
+
+---
+# Normal priority: Monitoring, logging
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: forge-normal
+globalDefault: true
+value: 10000
+preemptionPolicy: PreemptLowerPriority
+description: "Normal priority for non-critical services"
+
+---
+# Low priority: Batch jobs, background tasks
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: forge-low
+globalDefault: false
+value: 1000
+preemptionPolicy: Never
+description: "Low priority - will not preempt other workloads"

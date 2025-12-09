@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: forge-cognition
+  labels:
+    app.kubernetes.io/name: forge-cognition
+    app.kubernetes.io/part-of: honeywell-forge

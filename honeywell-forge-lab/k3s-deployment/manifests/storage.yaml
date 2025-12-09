@@ -1,0 +1,68 @@
+# Honeywell Forge Cognition - Storage Configuration
+# Persistent storage for models and cache
+---
+# Model storage PVC (for TensorRT engines)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-storage
+  namespace: forge-cognition
+  labels:
+    app: inference-server
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path  # K3s default storage class
+  resources:
+    requests:
+      storage: 50Gi  # TensorRT engines can be 10-30GB
+
+---
+# Cache storage for KV cache overflow (optional)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cache-storage
+  namespace: forge-cognition
+  labels:
+    app: inference-server
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 20Gi
+
+---
+# HostPath PV for local model files (alternative to PVC)
+# Use this when models are pre-loaded on the appliance
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: local-models
+  labels:
+    type: local
+spec:
+  storageClassName: manual
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: /opt/forge/models
+    type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: local-models
+  namespace: forge-cognition
+spec:
+  storageClassName: manual
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi

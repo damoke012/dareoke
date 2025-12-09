@@ -1,0 +1,62 @@
+# NVIDIA Device Plugin Time-Slicing Configuration
+# This file is used by the NVIDIA device plugin to enable GPU sharing
+#
+# Time-slicing allows multiple pods to share a single GPU by time-multiplexing
+# GPU access. This is different from MIG which provides hardware isolation.
+#
+# Pros:
+#   - Works on ANY NVIDIA GPU (including Pascal, Turing, Ampere, etc.)
+#   - No hardware changes required
+#   - Simple configuration
+#
+# Cons:
+#   - No memory isolation (pods share GPU memory)
+#   - Context switching overhead
+#   - Potential for OOM if pods exceed memory limits
+#
+# Configuration Options:
+#   replicas: Number of virtual GPUs to create from each physical GPU
+#   renameByDefault: If true, resources show as "nvidia.com/gpu.shared"
+#   failRequestsGreaterThanOne: If true, reject requests for >1 GPU
+#
+# Recommended settings per SKU:
+#   - Jetson Thor (128GB): 4-8 replicas
+#   - RTX Pro 4000 (20GB): 2-4 replicas
+#   - Tesla P40 (24GB): 2-4 replicas
+#
+---
+version: v1
+flags:
+  migStrategy: none  # Not using MIG (not available on these GPUs)
+
+sharing:
+  timeSlicing:
+    renameByDefault: false
+    failRequestsGreaterThanOne: false
+    resources:
+      - name: nvidia.com/gpu
+        replicas: 4  # Create 4 virtual GPUs from 1 physical GPU
+
+# Alternative configurations:
+#
+# For Jetson Thor (more memory, more slices):
+# sharing:
+#   timeSlicing:
+#     resources:
+#       - name: nvidia.com/gpu
+#         replicas: 8
+#
+# For RTX Pro 4000 (limited memory, fewer slices):
+# sharing:
+#   timeSlicing:
+#     resources:
+#       - name: nvidia.com/gpu
+#         replicas: 2
+#
+# For production with stricter isolation (reject multi-GPU requests):
+# sharing:
+#   timeSlicing:
+#     failRequestsGreaterThanOne: true
+#     resources:
+#       - name: nvidia.com/gpu
+#         replicas: 4

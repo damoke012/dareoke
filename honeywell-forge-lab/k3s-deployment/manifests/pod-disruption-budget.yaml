@@ -1,0 +1,30 @@
+# Honeywell Forge Cognition - Pod Disruption Budget
+# Ensures availability during updates and node maintenance
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: inference-server-pdb
+  namespace: forge-cognition
+  labels:
+    app: inference-server
+spec:
+  # For single-node edge: allow disruption but with warning
+  # For multi-node: ensure at least 1 pod always running
+  minAvailable: 0  # Single-node: can't guarantee availability
+  selector:
+    matchLabels:
+      app: inference-server
+
+---
+# Alternative: For multi-node deployments
+# apiVersion: policy/v1
+# kind: PodDisruptionBudget
+# metadata:
+#   name: inference-server-pdb-ha
+#   namespace: forge-cognition
+# spec:
+#   minAvailable: 1
+#   selector:
+#     matchLabels:
+#       app: inference-server
