@@ -1,337 +1,201 @@
 # Honeywell Forge Cognition - K3s Deployment Pipeline
 #
-# This workflow deploys K3s infrastructure to your ESXi lab environment.
-#
-# Triggers:
-#   - Manual dispatch (workflow_dispatch)
-#   - Push to main branch (infrastructure changes)
+# This workflow deploys a K3s cluster to ESXi without requiring vCenter.
+# It clones VMs from a template and installs K3s automatically.
 #
 # Prerequisites:
-#   1. Set up GitHub Secrets:
-#      - VSPHERE_SERVER: ESXi IP address
-#      - VSPHERE_USER: ESXi username (root)
-#      - VSPHERE_PASSWORD: ESXi password
-#      - SSH_PRIVATE_KEY: SSH private key for VM access
-#      - SSH_PUBLIC_KEY: SSH public key for VM provisioning
-#
-#   2. Create VM template in ESXi with Ubuntu 22.04 + cloud-init
+#   1. Ubuntu template VM created on ESXi (see scripts/create-ubuntu-template.sh)
+#   2. GitHub Secrets configured:
+#      - ESXI_HOST: ESXi IP address (e.g., 192.168.1.144)
+#      - ESXI_PASSWORD: ESXi root password
+#      - SSH_PUBLIC_KEY: SSH public key for VM access (optional)
 #
 # Usage:
 #   1. Go to Actions tab in GitHub
-#   2. Select "Deploy K3s Infrastructure"
+#   2. Select "Deploy K3s Cluster"
 #   3. Click "Run workflow"
-#   4. Choose action: plan, apply, or destroy
+#   4. Choose action: deploy or destroy
 
-name: Deploy K3s Infrastructure
+name: Deploy K3s Cluster
 
 on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'Terraform action'
+        description: 'Action to perform'
         required: true
-        default: 'plan'
+        default: 'deploy'
         type: choice
         options:
-          - plan
-          - apply
+          - deploy
           - destroy
-      deploy_k3s:
-        description: 'Deploy K3s after VM creation'
+      k3s_server_name:
+        description: 'K3s server VM name'
         required: false
-        default: true
-        type: boolean
+        default: 'k3s-server'
+      k3s_agent_name:
+        description: 'K3s agent VM name'
+        required: false
+        default: 'k3s-gpu-agent'
   push:
     branches:
       - main
     paths:
-      - 'honeywell-forge-lab/infrastructure/terraform/**'
-      - 'honeywell-forge-lab/infrastructure/ansible/**'
-      - 'honeywell-forge-lab/k3s-deployment/**'
+      - 'honeywell-forge-lab/infrastructure/scripts/deploy-k3s-cluster.sh'
 
 env:
-  TF_WORKING_DIR: honeywell-forge-lab/infrastructure/terraform
-  ANSIBLE_DIR: honeywell-forge-lab/infrastructure/ansible
+  ESXI_HOST: ${{ secrets.ESXI_HOST }}
+  ESXI_USER: root
+  ESXI_PASSWORD: ${{ secrets.ESXI_PASSWORD }}
+  SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+  TEMPLATE_NAME: ubuntu-template
+  K3S_SERVER_NAME: ${{ github.event.inputs.k3s_server_name || 'k3s-server' }}
+  K3S_AGENT_NAME: ${{ github.event.inputs.k3s_agent_name || 'k3s-gpu-agent' }}
 
 jobs:
-  # ==========================================================================
-  # Terraform: Provision VMs
-  # ==========================================================================
-  terraform:
-    name: Terraform ${{ github.event.inputs.action || 'plan' }}
+  deploy:
+    name: ${{ github.event.inputs.action || 'deploy' }} K3s Cluster
     runs-on: ubuntu-latest
-    outputs:
-      k3s_server_ip: ${{ steps.outputs.outputs.k3s_server_ip }}
-      k3s_agent_ip: ${{ steps.outputs.outputs.k3s_agent_ip }}
+    # Only run on self-hosted runner if available (has network access to ESXi)
+    # runs-on: self-hosted
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.6.0
-          terraform_wrapper: false
-
-      - name: Create terraform.tfvars
-        working-directory: ${{ env.TF_WORKING_DIR }}
+      - name: Install dependencies
         run: |
-          cat > terraform.tfvars << EOF
-          vsphere_server   = "${{ secrets.VSPHERE_SERVER }}"
-          vsphere_user     = "${{ secrets.VSPHERE_USER }}"
-          vsphere_password = "${{ secrets.VSPHERE_PASSWORD }}"
-          datacenter       = "ha-datacenter"
-          datastore        = "datastore1"
-          network          = "VM Network"
-          resource_pool    = "ha-root-pool"
-          template         = "ubuntu-22.04-template"
-          ssh_public_key   = "${{ secrets.SSH_PUBLIC_KEY }}"
+          sudo apt-get update
+          sudo apt-get install -y sshpass
 
-          k3s_server_name      = "k3s-server"
-          k3s_server_cpus      = 4
-          k3s_server_memory    = 8192
-          k3s_server_disk_size = 100
+      - name: Validate secrets
+        run: |
+          if [[ -z "${{ secrets.ESXI_HOST }}" ]]; then
+            echo "::error::ESXI_HOST secret is not set"
+            exit 1
+          fi
+          if [[ -z "${{ secrets.ESXI_PASSWORD }}" ]]; then
+            echo "::error::ESXI_PASSWORD secret is not set"
+            exit 1
+          fi
 
-          k3s_agent_name      = "k3s-gpu-agent"
-          k3s_agent_cpus      = 8
-          k3s_agent_memory    = 32768
-          k3s_agent_disk_size = 200
-          EOF
+      - name: Test ESXi connectivity
+        run: |
+          sshpass -p "${{ secrets.ESXI_PASSWORD }}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+            root@${{ secrets.ESXI_HOST }} "echo 'ESXi connection OK'"
 
-      - name: Terraform Init
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform init
-
-      - name: Terraform Validate
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform validate
-
-      - name: Terraform Plan
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform plan -out=tfplan
+      - name: Deploy K3s Cluster
         if: github.event.inputs.action != 'destroy'
+        working-directory: honeywell-forge-lab/infrastructure/scripts
+        run: |
+          chmod +x deploy-k3s-cluster.sh
+          ./deploy-k3s-cluster.sh
 
-      - name: Terraform Apply
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform apply -auto-approve tfplan
-        if: github.event.inputs.action == 'apply'
-
-      - name: Terraform Destroy
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform destroy -auto-approve
+      - name: Destroy K3s Cluster
         if: github.event.inputs.action == 'destroy'
-
-      - name: Get Terraform Outputs
-        id: outputs
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        if: github.event.inputs.action == 'apply'
+        working-directory: honeywell-forge-lab/infrastructure/scripts
         run: |
-          echo "k3s_server_ip=$(terraform output -raw k3s_server_ip)" >> $GITHUB_OUTPUT
-          echo "k3s_agent_ip=$(terraform output -raw k3s_agent_ip)" >> $GITHUB_OUTPUT
+          chmod +x deploy-k3s-cluster.sh
+          ./deploy-k3s-cluster.sh --destroy
 
-      - name: Upload Terraform State
+      - name: Upload cluster info
+        if: github.event.inputs.action != 'destroy'
         uses: actions/upload-artifact@v4
         with:
-          name: terraform-state
-          path: |
-            ${{ env.TF_WORKING_DIR }}/terraform.tfstate
-            ${{ env.TF_WORKING_DIR }}/terraform.tfstate.backup
+          name: cluster-info
+          path: honeywell-forge-lab/infrastructure/scripts/cluster-info.txt
           retention-days: 30
-        if: always()
 
-  # ==========================================================================
-  # Ansible: Deploy K3s
-  # ==========================================================================
-  deploy-k3s:
-    name: Deploy K3s Cluster
-    runs-on: ubuntu-latest
-    needs: terraform
-    if: |
-      github.event.inputs.action == 'apply' &&
-      github.event.inputs.deploy_k3s == 'true' &&
-      needs.terraform.outputs.k3s_server_ip != ''
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install Ansible
+      - name: Get kubeconfig
+        if: github.event.inputs.action != 'destroy'
+        continue-on-error: true
         run: |
-          pip install ansible kubernetes
+          if [[ -f honeywell-forge-lab/infrastructure/scripts/cluster-info.txt ]]; then
+            source honeywell-forge-lab/infrastructure/scripts/cluster-info.txt
+            sshpass -p "dare" scp -o StrictHostKeyChecking=no \
+              dare@${K3S_SERVER_IP}:/etc/rancher/k3s/k3s.yaml ./kubeconfig.yaml
+            sed -i "s/127.0.0.1/${K3S_SERVER_IP}/g" ./kubeconfig.yaml
+          fi
 
-      - name: Setup SSH Key
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ needs.terraform.outputs.k3s_server_ip }} >> ~/.ssh/known_hosts 2>/dev/null || true
-          ssh-keyscan -H ${{ needs.terraform.outputs.k3s_agent_ip }} >> ~/.ssh/known_hosts 2>/dev/null || true
-
-      - name: Wait for VMs to be ready
-        run: |
-          echo "Waiting for VMs to be accessible..."
-          for i in {1..30}; do
-            if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@${{ needs.terraform.outputs.k3s_server_ip }} "echo OK" 2>/dev/null; then
-              echo "K3s server is ready"
-              break
-            fi
-            echo "Attempt $i: Waiting for k3s-server..."
-            sleep 10
-          done
-
-          for i in {1..30}; do
-            if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@${{ needs.terraform.outputs.k3s_agent_ip }} "echo OK" 2>/dev/null; then
-              echo "K3s agent is ready"
-              break
-            fi
-            echo "Attempt $i: Waiting for k3s-gpu-agent..."
-            sleep 10
-          done
-
-      - name: Create Ansible Inventory
-        run: |
-          cat > inventory.yaml << EOF
-          all:
-            vars:
-              ansible_user: root
-              ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
-              k3s_version: "v1.28.4+k3s1"
-
-            children:
-              k3s_servers:
-                hosts:
-                  k3s-server:
-                    ansible_host: ${{ needs.terraform.outputs.k3s_server_ip }}
-                    k3s_role: server
-
-              k3s_agents:
-                hosts:
-                  k3s-gpu-agent:
-                    ansible_host: ${{ needs.terraform.outputs.k3s_agent_ip }}
-                    k3s_role: agent
-                    gpu_enabled: true
-          EOF
-
-      - name: Install K3s on Server
-        run: |
-          ssh -o StrictHostKeyChecking=no root@${{ needs.terraform.outputs.k3s_server_ip }} << 'ENDSSH'
-          curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="v1.28.4+k3s1" sh -s - \
-            --write-kubeconfig-mode 644 \
-            --disable traefik \
-            --disable servicelb
-
-          # Wait for K3s to be ready
-          until kubectl get nodes &> /dev/null; do
-            echo "Waiting for K3s API..."
-            sleep 5
-          done
-
-          kubectl wait --for=condition=Ready node --all --timeout=120s
-          echo "K3s server is ready!"
-          ENDSSH
-
-      - name: Get K3s Token
-        id: k3s-token
-        run: |
-          TOKEN=$(ssh -o StrictHostKeyChecking=no root@${{ needs.terraform.outputs.k3s_server_ip }} \
-            "cat /var/lib/rancher/k3s/server/node-token")
-          echo "token=$TOKEN" >> $GITHUB_OUTPUT
-
-      - name: Join K3s Agent
-        run: |
-          ssh -o StrictHostKeyChecking=no root@${{ needs.terraform.outputs.k3s_agent_ip }} << ENDSSH
-          curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="v1.28.4+k3s1" \
-            K3S_URL=https://${{ needs.terraform.outputs.k3s_server_ip }}:6443 \
-            K3S_TOKEN="${{ steps.k3s-token.outputs.token }}" \
-            sh -
-          ENDSSH
-
-      - name: Verify Cluster
-        run: |
-          ssh -o StrictHostKeyChecking=no root@${{ needs.terraform.outputs.k3s_server_ip }} << 'ENDSSH'
-          echo "=== Cluster Nodes ==="
-          kubectl get nodes -o wide
-
-          echo ""
-          echo "=== System Pods ==="
-          kubectl get pods -A
-
-          echo ""
-          echo "=== Cluster Info ==="
-          kubectl cluster-info
-          ENDSSH
-
-      - name: Save Kubeconfig
-        run: |
-          mkdir -p ~/.kube
-          ssh -o StrictHostKeyChecking=no root@${{ needs.terraform.outputs.k3s_server_ip }} \
-            "cat /etc/rancher/k3s/k3s.yaml" | \
-            sed "s/127.0.0.1/${{ needs.terraform.outputs.k3s_server_ip }}/g" > kubeconfig.yaml
-
-      - name: Upload Kubeconfig
+      - name: Upload kubeconfig
+        if: github.event.inputs.action != 'destroy'
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: kubeconfig
           path: kubeconfig.yaml
           retention-days: 7
 
       - name: Summary
+        if: github.event.inputs.action != 'destroy'
         run: |
-          echo "## K3s Deployment Complete!" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Cluster Information" >> $GITHUB_STEP_SUMMARY
-          echo "| Component | IP Address |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----------|------------|" >> $GITHUB_STEP_SUMMARY
-          echo "| K3s Server | ${{ needs.terraform.outputs.k3s_server_ip }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| K3s GPU Agent | ${{ needs.terraform.outputs.k3s_agent_ip }} |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
-          echo "1. Download kubeconfig from artifacts" >> $GITHUB_STEP_SUMMARY
-          echo "2. Configure GPU passthrough in ESXi for k3s-gpu-agent" >> $GITHUB_STEP_SUMMARY
-          echo "3. Install NVIDIA drivers on the GPU agent" >> $GITHUB_STEP_SUMMARY
-          echo "4. Deploy the Forge Cognition workloads" >> $GITHUB_STEP_SUMMARY
+          if [[ -f honeywell-forge-lab/infrastructure/scripts/cluster-info.txt ]]; then
+            source honeywell-forge-lab/infrastructure/scripts/cluster-info.txt
+            echo "## K3s Cluster Deployed!" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Component | Value |" >> $GITHUB_STEP_SUMMARY
+            echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| K3s Server | ${K3S_SERVER_NAME} (${K3S_SERVER_IP}) |" >> $GITHUB_STEP_SUMMARY
+            echo "| K3s Agent | ${K3S_AGENT_NAME} (${K3S_AGENT_IP}) |" >> $GITHUB_STEP_SUMMARY
+            echo "| ESXi Host | ${ESXI_HOST} |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Access Commands" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+            echo "# SSH to K3s server" >> $GITHUB_STEP_SUMMARY
+            echo "ssh dare@${K3S_SERVER_IP}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "# View cluster nodes" >> $GITHUB_STEP_SUMMARY
+            echo "sudo kubectl get nodes" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
 
   # ==========================================================================
-  # GPU Setup (Optional - manual trigger)
+  # GPU Setup Job (runs after deploy, optional)
   # ==========================================================================
   setup-gpu:
     name: Setup GPU Drivers
     runs-on: ubuntu-latest
-    needs: [terraform, deploy-k3s]
-    if: |
-      github.event.inputs.action == 'apply' &&
-      github.event.inputs.deploy_k3s == 'true' &&
-      needs.terraform.outputs.k3s_agent_ip != ''
+    needs: deploy
+    if: github.event.inputs.action != 'destroy'
+    continue-on-error: true
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup SSH Key
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
+      - name: Install dependencies
+        run: sudo apt-get install -y sshpass
 
-      - name: Check GPU Status
-        continue-on-error: true
+      - name: Download cluster info
+        uses: actions/download-artifact@v4
+        with:
+          name: cluster-info
+
+      - name: Check GPU availability
         run: |
-          echo "Checking GPU on k3s-gpu-agent..."
-          ssh -o StrictHostKeyChecking=no root@${{ needs.terraform.outputs.k3s_agent_ip }} << 'ENDSSH'
-          echo "=== PCI Devices ==="
-          lspci | grep -i nvidia || echo "No NVIDIA GPU detected via lspci"
+          if [[ -f cluster-info.txt ]]; then
+            source cluster-info.txt
+            echo "Checking GPU on ${K3S_AGENT_IP}..."
+            sshpass -p "dare" ssh -o StrictHostKeyChecking=no dare@${K3S_AGENT_IP} << 'ENDSSH'
+          echo "=== Checking for NVIDIA GPU ==="
+          lspci | grep -i nvidia || echo "No NVIDIA GPU detected (GPU passthrough may not be configured)"
 
           echo ""
-          echo "=== NVIDIA Driver Status ==="
-          nvidia-smi 2>/dev/null || echo "NVIDIA drivers not installed yet"
+          echo "=== Checking NVIDIA driver ==="
+          nvidia-smi 2>/dev/null || echo "NVIDIA drivers not installed"
 
           echo ""
-          echo "GPU passthrough must be configured in ESXi before drivers can be installed."
+          echo "Note: GPU passthrough must be configured in ESXi before GPU is visible."
           echo "See: honeywell-forge-lab/docs/GPU_PASSTHROUGH_GUIDE.md"
           ENDSSH
+          fi
+
+      - name: GPU Summary
+        run: |
+          echo "## GPU Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "GPU passthrough must be manually configured in ESXi:" >> $GITHUB_STEP_SUMMARY
+          echo "1. ESXi Host > Configure > Hardware > PCI Devices" >> $GITHUB_STEP_SUMMARY
+          echo "2. Select NVIDIA GPU > Toggle Passthrough" >> $GITHUB_STEP_SUMMARY
+          echo "3. Reboot ESXi host" >> $GITHUB_STEP_SUMMARY
+          echo "4. Edit VM > Add PCI Device > Select GPU" >> $GITHUB_STEP_SUMMARY
