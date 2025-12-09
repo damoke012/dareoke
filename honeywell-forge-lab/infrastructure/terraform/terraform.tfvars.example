@@ -26,17 +26,14 @@ resource_pool = "ha-root-pool"    # Default for standalone ESXi
 # VM Template
 # =============================================================================
 # You need a VM template with:
-#   - Ubuntu 22.04 or Rocky Linux 9
+#   - Ubuntu 20.04/22.04 or Rocky Linux 9
 #   - cloud-init installed
 #   - VMware Tools installed
 #
-# To create a template:
-#   1. Create a VM, install Ubuntu 22.04
-#   2. Install: apt install cloud-init open-vm-tools
-#   3. Clean: cloud-init clean
-#   4. Shutdown and convert to template
+# Template was created via CLI - see infrastructure/scripts/create-ubuntu-template.sh
+# Default user: dare
 #
-template = "ubuntu-22.04-template"
+template = "ubuntu-template"
 
 # =============================================================================
 # K3s Server VM (Control Plane - lightweight)

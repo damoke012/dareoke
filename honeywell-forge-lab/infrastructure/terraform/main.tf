@@ -70,9 +70,9 @@ variable "resource_pool" {
 }
 
 variable "template" {
-  description = "VM template name (Ubuntu 22.04 or Rocky 9 recommended)"
+  description = "VM template name (Ubuntu 20.04/22.04 or Rocky 9 recommended)"
   type        = string
-  default     = "ubuntu-22.04-template"
+  default     = "ubuntu-template"
 }
 
 variable "ssh_public_key" {
