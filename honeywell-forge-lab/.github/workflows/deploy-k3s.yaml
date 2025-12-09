@@ -1,20 +1,25 @@
-# Honeywell Forge Cognition - K3s Deployment Pipeline
+# Honeywell Forge Cognition - K3s + GPU Operator Deployment Pipeline
 #
-# This workflow deploys a K3s cluster to ESXi without requiring vCenter.
-# It clones VMs from a template and installs K3s automatically.
+# This workflow deploys:
+#   1. K3s cluster (server + GPU agent)
+#   2. NVIDIA GPU Operator via Helm
+#   3. GPU time-slicing configuration
 #
 # Prerequisites:
 #   1. Ubuntu template VM created on ESXi (see scripts/create-ubuntu-template.sh)
-#   2. GitHub Secrets configured:
-#      - ESXI_HOST: ESXi IP address (e.g., 192.168.1.144)
+#   2. GPU passthrough configured in ESXi for agent VM
+#   3. GitHub Secrets configured:
+#      - ESXI_HOST: ESXi IP address
 #      - ESXI_PASSWORD: ESXi root password
-#      - SSH_PUBLIC_KEY: SSH public key for VM access (optional)
+#      - VM_PASSWORD: SSH password for VMs
+#      - K3S_SERVER_IP: K3s server IP (for GPU operator install)
+#      - K3S_AGENT_IP: K3s agent IP (optional)
 #
 # Usage:
 #   1. Go to Actions tab in GitHub
 #   2. Select "Deploy K3s Cluster"
 #   3. Click "Run workflow"
-#   4. Choose action: deploy or destroy
+#   4. Choose components to deploy
 
 name: Deploy K3s Cluster
 
@@ -24,40 +29,69 @@ on:
       action:
         description: 'Action to perform'
         required: true
-        default: 'deploy'
+        default: 'deploy-all'
         type: choice
         options:
-          - deploy
+          - deploy-all
+          - deploy-k3s-only
+          - deploy-gpu-operator-only
           - destroy
-      k3s_server_name:
-        description: 'K3s server VM name'
+      k3s_server_ip:
+        description: 'K3s server IP (for GPU operator install on existing cluster)'
         required: false
-        default: 'k3s-server'
-      k3s_agent_name:
-        description: 'K3s agent VM name'
+        default: ''
+      k3s_agent_ip:
+        description: 'K3s agent IP (optional)'
         required: false
-        default: 'k3s-gpu-agent'
+        default: ''
+      gpu_time_slices:
+        description: 'Number of GPU time slices'
+        required: false
+        default: '4'
+      skip_driver:
+        description: 'Skip NVIDIA driver install (use pre-installed)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
   push:
     branches:
       - main
     paths:
-      - 'honeywell-forge-lab/infrastructure/scripts/deploy-k3s-cluster.sh'
+      - 'honeywell-forge-lab/infrastructure/scripts/install-k3s.sh'
+      - 'honeywell-forge-lab/infrastructure/scripts/install-gpu-operator.sh'
 
 env:
+  # ESXi settings (for VM provisioning)
   ESXI_HOST: ${{ secrets.ESXI_HOST }}
   ESXI_USER: root
   ESXI_PASSWORD: ${{ secrets.ESXI_PASSWORD }}
-  SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
-  TEMPLATE_NAME: ubuntu-template
-  K3S_SERVER_NAME: ${{ github.event.inputs.k3s_server_name || 'k3s-server' }}
-  K3S_AGENT_NAME: ${{ github.event.inputs.k3s_agent_name || 'k3s-gpu-agent' }}
+
+  # VM settings
+  VM_USER: dare
+  VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
+
+  # K3s settings
+  K3S_SERVER_IP: ${{ github.event.inputs.k3s_server_ip || secrets.K3S_SERVER_IP }}
+  K3S_AGENT_IP: ${{ github.event.inputs.k3s_agent_ip || secrets.K3S_AGENT_IP }}
+
+  # GPU settings
+  GPU_TIME_SLICES: ${{ github.event.inputs.gpu_time_slices || '4' }}
+  SKIP_DRIVER: ${{ github.event.inputs.skip_driver || 'false' }}
 
 jobs:
-  deploy:
-    name: ${{ github.event.inputs.action || 'deploy' }} K3s Cluster
+  # ==========================================================================
+  # Deploy K3s Cluster
+  # ==========================================================================
+  deploy-k3s:
+    name: Deploy K3s Cluster
     runs-on: ubuntu-latest
-    # Only run on self-hosted runner if available (has network access to ESXi)
-    # runs-on: self-hosted
+    if: github.event.inputs.action == 'deploy-all' || github.event.inputs.action == 'deploy-k3s-only'
+    outputs:
+      k3s_server_ip: ${{ steps.cluster-info.outputs.server_ip }}
+      k3s_agent_ip: ${{ steps.cluster-info.outputs.agent_ip }}
 
     steps:
       - name: Checkout code
@@ -70,94 +104,135 @@ jobs:
 
       - name: Validate secrets
         run: |
-          if [[ -z "${{ secrets.ESXI_HOST }}" ]]; then
-            echo "::error::ESXI_HOST secret is not set"
+          if [[ -z "${{ secrets.VM_PASSWORD }}" ]]; then
+            echo "::error::VM_PASSWORD secret is not set"
             exit 1
           fi
-          if [[ -z "${{ secrets.ESXI_PASSWORD }}" ]]; then
-            echo "::error::ESXI_PASSWORD secret is not set"
+          if [[ -z "${{ env.K3S_SERVER_IP }}" ]]; then
+            echo "::error::K3S_SERVER_IP is not set (provide as input or secret)"
             exit 1
           fi
 
-      - name: Test ESXi connectivity
-        run: |
-          sshpass -p "${{ secrets.ESXI_PASSWORD }}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
-            root@${{ secrets.ESXI_HOST }} "echo 'ESXi connection OK'"
-
-      - name: Deploy K3s Cluster
-        if: github.event.inputs.action != 'destroy'
+      - name: Install K3s Cluster
         working-directory: honeywell-forge-lab/infrastructure/scripts
+        env:
+          VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
         run: |
-          chmod +x deploy-k3s-cluster.sh
-          ./deploy-k3s-cluster.sh
+          chmod +x install-k3s.sh
+          ./install-k3s.sh
 
-      - name: Destroy K3s Cluster
-        if: github.event.inputs.action == 'destroy'
-        working-directory: honeywell-forge-lab/infrastructure/scripts
+      - name: Get cluster info
+        id: cluster-info
         run: |
-          chmod +x deploy-k3s-cluster.sh
-          ./deploy-k3s-cluster.sh --destroy
+          if [[ -f honeywell-forge-lab/infrastructure/scripts/cluster-info.txt ]]; then
+            source honeywell-forge-lab/infrastructure/scripts/cluster-info.txt
+            echo "server_ip=${K3S_SERVER_IP}" >> $GITHUB_OUTPUT
+            echo "agent_ip=${K3S_AGENT_IP}" >> $GITHUB_OUTPUT
+          else
+            echo "server_ip=${{ env.K3S_SERVER_IP }}" >> $GITHUB_OUTPUT
+            echo "agent_ip=${{ env.K3S_AGENT_IP }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Verify K3s cluster
+        env:
+          VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
+        run: |
+          sshpass -p "${VM_PASSWORD}" ssh -o StrictHostKeyChecking=no \
+            ${VM_USER}@${{ steps.cluster-info.outputs.server_ip }} \
+            "sudo kubectl get nodes -o wide"
 
       - name: Upload cluster info
-        if: github.event.inputs.action != 'destroy'
         uses: actions/upload-artifact@v4
         with:
           name: cluster-info
           path: honeywell-forge-lab/infrastructure/scripts/cluster-info.txt
           retention-days: 30
 
-      - name: Get kubeconfig
-        if: github.event.inputs.action != 'destroy'
-        continue-on-error: true
-        run: |
-          if [[ -f honeywell-forge-lab/infrastructure/scripts/cluster-info.txt ]]; then
-            source honeywell-forge-lab/infrastructure/scripts/cluster-info.txt
-            sshpass -p "dare" scp -o StrictHostKeyChecking=no \
-              dare@${K3S_SERVER_IP}:/etc/rancher/k3s/k3s.yaml ./kubeconfig.yaml
-            sed -i "s/127.0.0.1/${K3S_SERVER_IP}/g" ./kubeconfig.yaml
-          fi
-
-      - name: Upload kubeconfig
-        if: github.event.inputs.action != 'destroy'
-        uses: actions/upload-artifact@v4
-        continue-on-error: true
-        with:
-          name: kubeconfig
-          path: kubeconfig.yaml
-          retention-days: 7
-
-      - name: Summary
-        if: github.event.inputs.action != 'destroy'
-        run: |
-          if [[ -f honeywell-forge-lab/infrastructure/scripts/cluster-info.txt ]]; then
-            source honeywell-forge-lab/infrastructure/scripts/cluster-info.txt
-            echo "## K3s Cluster Deployed!" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "| Component | Value |" >> $GITHUB_STEP_SUMMARY
-            echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
-            echo "| K3s Server | ${K3S_SERVER_NAME} (${K3S_SERVER_IP}) |" >> $GITHUB_STEP_SUMMARY
-            echo "| K3s Agent | ${K3S_AGENT_NAME} (${K3S_AGENT_IP}) |" >> $GITHUB_STEP_SUMMARY
-            echo "| ESXi Host | ${ESXI_HOST} |" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### Access Commands" >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-            echo "# SSH to K3s server" >> $GITHUB_STEP_SUMMARY
-            echo "ssh dare@${K3S_SERVER_IP}" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "# View cluster nodes" >> $GITHUB_STEP_SUMMARY
-            echo "sudo kubectl get nodes" >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          fi
-
   # ==========================================================================
-  # GPU Setup Job (runs after deploy, optional)
+  # Deploy GPU Operator
   # ==========================================================================
-  setup-gpu:
-    name: Setup GPU Drivers
+  deploy-gpu-operator:
+    name: Deploy GPU Operator
     runs-on: ubuntu-latest
-    needs: deploy
-    if: github.event.inputs.action != 'destroy'
-    continue-on-error: true
+    needs: [deploy-k3s]
+    if: |
+      always() &&
+      (github.event.inputs.action == 'deploy-all' || github.event.inputs.action == 'deploy-gpu-operator-only') &&
+      (needs.deploy-k3s.result == 'success' || needs.deploy-k3s.result == 'skipped')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sshpass
+
+      - name: Get K3s server IP
+        id: get-ip
+        run: |
+          # Use output from deploy-k3s job if available
+          if [[ -n "${{ needs.deploy-k3s.outputs.k3s_server_ip }}" ]]; then
+            echo "server_ip=${{ needs.deploy-k3s.outputs.k3s_server_ip }}" >> $GITHUB_OUTPUT
+          else
+            echo "server_ip=${{ env.K3S_SERVER_IP }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Validate K3s server IP
+        run: |
+          if [[ -z "${{ steps.get-ip.outputs.server_ip }}" ]]; then
+            echo "::error::K3S_SERVER_IP is required for GPU operator installation"
+            exit 1
+          fi
+          echo "Installing GPU Operator on K3s server: ${{ steps.get-ip.outputs.server_ip }}"
+
+      - name: Install GPU Operator via Helm
+        working-directory: honeywell-forge-lab/infrastructure/scripts
+        env:
+          K3S_SERVER_IP: ${{ steps.get-ip.outputs.server_ip }}
+          VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
+          GPU_TIME_SLICES: ${{ env.GPU_TIME_SLICES }}
+          SKIP_DRIVER: ${{ env.SKIP_DRIVER }}
+        run: |
+          chmod +x install-gpu-operator.sh
+          ./install-gpu-operator.sh
+
+      - name: Verify GPU resources
+        env:
+          VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
+        run: |
+          echo "Checking GPU resources in cluster..."
+          sshpass -p "${VM_PASSWORD}" ssh -o StrictHostKeyChecking=no \
+            ${VM_USER}@${{ steps.get-ip.outputs.server_ip }} \
+            "sudo kubectl get nodes -o custom-columns='NAME:.metadata.name,GPU:.status.allocatable.nvidia\.com/gpu'"
+
+      - name: GPU Operator Summary
+        run: |
+          echo "## GPU Operator Deployed!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| K3s Server | ${{ steps.get-ip.outputs.server_ip }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| GPU Time Slices | ${{ env.GPU_TIME_SLICES }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Skip Driver | ${{ env.SKIP_DRIVER }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Verify GPU" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "kubectl get nodes -o custom-columns='NAME:.metadata.name,GPU:.status.allocatable.nvidia\.com/gpu'" >> $GITHUB_STEP_SUMMARY
+          echo "kubectl get pods -n gpu-operator" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+  # ==========================================================================
+  # Test GPU Workload
+  # ==========================================================================
+  test-gpu:
+    name: Test GPU Workload
+    runs-on: ubuntu-latest
+    needs: [deploy-gpu-operator]
+    if: |
+      always() &&
+      needs.deploy-gpu-operator.result == 'success'
 
     steps:
       - name: Checkout code
@@ -166,36 +241,107 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get install -y sshpass
 
-      - name: Download cluster info
-        uses: actions/download-artifact@v4
-        with:
-          name: cluster-info
-
-      - name: Check GPU availability
+      - name: Get K3s server IP
+        id: get-ip
         run: |
-          if [[ -f cluster-info.txt ]]; then
-            source cluster-info.txt
-            echo "Checking GPU on ${K3S_AGENT_IP}..."
-            sshpass -p "dare" ssh -o StrictHostKeyChecking=no dare@${K3S_AGENT_IP} << 'ENDSSH'
-          echo "=== Checking for NVIDIA GPU ==="
-          lspci | grep -i nvidia || echo "No NVIDIA GPU detected (GPU passthrough may not be configured)"
-
-          echo ""
-          echo "=== Checking NVIDIA driver ==="
-          nvidia-smi 2>/dev/null || echo "NVIDIA drivers not installed"
-
-          echo ""
-          echo "Note: GPU passthrough must be configured in ESXi before GPU is visible."
-          echo "See: honeywell-forge-lab/docs/GPU_PASSTHROUGH_GUIDE.md"
-          ENDSSH
+          if [[ -n "${{ needs.deploy-k3s.outputs.k3s_server_ip }}" ]]; then
+            echo "server_ip=${{ needs.deploy-k3s.outputs.k3s_server_ip }}" >> $GITHUB_OUTPUT
+          else
+            echo "server_ip=${{ env.K3S_SERVER_IP }}" >> $GITHUB_OUTPUT
           fi
 
-      - name: GPU Summary
+      - name: Run GPU test pod
+        env:
+          VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
         run: |
-          echo "## GPU Status" >> $GITHUB_STEP_SUMMARY
+          sshpass -p "${VM_PASSWORD}" ssh -o StrictHostKeyChecking=no \
+            ${VM_USER}@${{ steps.get-ip.outputs.server_ip }} << 'ENDSSH'
+
+          echo "=== Creating GPU test pod ==="
+          sudo kubectl delete pod gpu-test --ignore-not-found=true
+
+          cat <<EOF | sudo kubectl apply -f -
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: gpu-test
+          spec:
+            restartPolicy: Never
+            containers:
+            - name: cuda-test
+              image: nvidia/cuda:12.2.0-base-ubuntu22.04
+              command: ["nvidia-smi"]
+              resources:
+                limits:
+                  nvidia.com/gpu: 1
+          EOF
+
+          echo "=== Waiting for GPU test pod ==="
+          sudo kubectl wait --for=condition=Ready pod/gpu-test --timeout=120s || true
+
+          echo "=== GPU test output ==="
+          sleep 10
+          sudo kubectl logs gpu-test || echo "Pod may still be running..."
+
+          echo "=== Cleanup ==="
+          sudo kubectl delete pod gpu-test --ignore-not-found=true
+          ENDSSH
+
+  # ==========================================================================
+  # Destroy Cluster
+  # ==========================================================================
+  destroy:
+    name: Destroy Cluster
+    runs-on: ubuntu-latest
+    if: github.event.inputs.action == 'destroy'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get install -y sshpass
+
+      - name: Uninstall GPU Operator
+        if: env.K3S_SERVER_IP != ''
+        env:
+          VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
+        continue-on-error: true
+        run: |
+          sshpass -p "${VM_PASSWORD}" ssh -o StrictHostKeyChecking=no \
+            ${VM_USER}@${K3S_SERVER_IP} \
+            "sudo helm uninstall gpu-operator -n gpu-operator 2>/dev/null || true"
+
+      - name: Uninstall K3s
+        env:
+          VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
+        working-directory: honeywell-forge-lab/infrastructure/scripts
+        run: |
+          chmod +x install-k3s.sh
+          ./install-k3s.sh --uninstall || true
+
+  # ==========================================================================
+  # Summary
+  # ==========================================================================
+  summary:
+    name: Deployment Summary
+    runs-on: ubuntu-latest
+    needs: [deploy-k3s, deploy-gpu-operator, test-gpu]
+    if: always() && github.event.inputs.action != 'destroy'
+
+    steps:
+      - name: Generate Summary
+        run: |
+          echo "# Honeywell Forge K3s Deployment Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "GPU passthrough must be manually configured in ESXi:" >> $GITHUB_STEP_SUMMARY
-          echo "1. ESXi Host > Configure > Hardware > PCI Devices" >> $GITHUB_STEP_SUMMARY
-          echo "2. Select NVIDIA GPU > Toggle Passthrough" >> $GITHUB_STEP_SUMMARY
-          echo "3. Reboot ESXi host" >> $GITHUB_STEP_SUMMARY
-          echo "4. Edit VM > Add PCI Device > Select GPU" >> $GITHUB_STEP_SUMMARY
+          echo "## Job Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Deploy K3s | ${{ needs.deploy-k3s.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deploy GPU Operator | ${{ needs.deploy-gpu-operator.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Test GPU | ${{ needs.test-gpu.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "1. Deploy Forge Cognition application" >> $GITHUB_STEP_SUMMARY
+          echo "2. Configure monitoring and alerting" >> $GITHUB_STEP_SUMMARY
+          echo "3. Set up ingress for external access" >> $GITHUB_STEP_SUMMARY
