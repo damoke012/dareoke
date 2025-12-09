@@ -1,13 +1,14 @@
 # Honeywell Forge Cognition - Terraform Infrastructure
-# Provisions VMs for lab environment (optional - if using cloud/vSphere)
+# Provisions VMs for K3s lab environment on ESXi/vSphere
 #
-# Supported providers:
-#   - vSphere (ESXi) - for on-prem lab
-#   - AWS (optional)
-#   - Azure (optional)
+# Architecture:
+#   - k3s-server: Control plane node (lightweight, no GPU)
+#   - k3s-gpu-agent: Worker node with GPU passthrough
 #
 # Usage:
 #   cd terraform
+#   cp terraform.tfvars.example terraform.tfvars
+#   # Edit terraform.tfvars with your values
 #   terraform init
 #   terraform plan
 #   terraform apply
@@ -28,13 +29,14 @@ terraform {
 # Variables
 # =============================================================================
 variable "vsphere_server" {
-  description = "vSphere server address"
+  description = "vSphere/ESXi server address"
   type        = string
 }
 
 variable "vsphere_user" {
-  description = "vSphere username"
+  description = "vSphere username (root for standalone ESXi)"
   type        = string
+  default     = "root"
 }
 
 variable "vsphere_password" {
@@ -44,20 +46,15 @@ variable "vsphere_password" {
 }
 
 variable "datacenter" {
-  description = "vSphere datacenter name"
+  description = "vSphere datacenter name (use 'ha-datacenter' for standalone ESXi)"
   type        = string
-  default     = "Datacenter"
-}
-
-variable "cluster" {
-  description = "vSphere cluster name"
-  type        = string
-  default     = "Cluster"
+  default     = "ha-datacenter"
 }
 
 variable "datastore" {
   description = "vSphere datastore name"
   type        = string
+  default     = "datastore1"
 }
 
 variable "network" {
@@ -66,39 +63,90 @@ variable "network" {
   default     = "VM Network"
 }
 
+variable "resource_pool" {
+  description = "Resource pool path (use 'ha-root-pool' for standalone ESXi)"
+  type        = string
+  default     = "ha-root-pool"
+}
+
 variable "template" {
-  description = "VM template name (Ubuntu 22.04 recommended)"
+  description = "VM template name (Ubuntu 22.04 or Rocky 9 recommended)"
   type        = string
   default     = "ubuntu-22.04-template"
 }
 
-variable "vm_name" {
-  description = "Name for the GPU VM"
+variable "ssh_public_key" {
+  description = "SSH public key for VM access"
   type        = string
-  default     = "forge-lab-gpu"
 }
 
-variable "vm_cpus" {
-  description = "Number of CPUs"
+# K3s Server VM Configuration
+variable "k3s_server_name" {
+  description = "Name for the K3s server VM"
+  type        = string
+  default     = "k3s-server"
+}
+
+variable "k3s_server_cpus" {
+  description = "CPUs for K3s server"
+  type        = number
+  default     = 4
+}
+
+variable "k3s_server_memory" {
+  description = "Memory in MB for K3s server"
+  type        = number
+  default     = 8192  # 8GB
+}
+
+variable "k3s_server_disk_size" {
+  description = "Disk size in GB for K3s server"
+  type        = number
+  default     = 100
+}
+
+variable "k3s_server_ip" {
+  description = "Static IP for K3s server (leave empty for DHCP)"
+  type        = string
+  default     = ""
+}
+
+# K3s GPU Agent VM Configuration
+variable "k3s_agent_name" {
+  description = "Name for the K3s GPU agent VM"
+  type        = string
+  default     = "k3s-gpu-agent"
+}
+
+variable "k3s_agent_cpus" {
+  description = "CPUs for K3s GPU agent"
   type        = number
   default     = 8
 }
 
-variable "vm_memory" {
-  description = "Memory in MB"
+variable "k3s_agent_memory" {
+  description = "Memory in MB for K3s GPU agent"
   type        = number
   default     = 32768  # 32GB
 }
 
-variable "vm_disk_size" {
-  description = "Disk size in GB"
+variable "k3s_agent_disk_size" {
+  description = "Disk size in GB for K3s GPU agent"
   type        = number
   default     = 200
 }
 
-variable "ssh_public_key" {
-  description = "SSH public key for access"
+variable "k3s_agent_ip" {
+  description = "Static IP for K3s GPU agent (leave empty for DHCP)"
   type        = string
+  default     = ""
+}
+
+# GPU Configuration
+variable "gpu_pci_device_id" {
+  description = "PCI device ID for GPU passthrough (e.g., '0000:3b:00.0'). Leave empty to skip GPU passthrough."
+  type        = string
+  default     = ""
 }
 
 # =============================================================================
@@ -118,11 +166,6 @@ data "vsphere_datacenter" "dc" {
   name = var.datacenter
 }
 
-data "vsphere_compute_cluster" "cluster" {
-  name          = var.cluster
-  datacenter_id = data.vsphere_datacenter.dc.id
-}
-
 data "vsphere_datastore" "datastore" {
   name          = var.datastore
   datacenter_id = data.vsphere_datacenter.dc.id
@@ -133,21 +176,26 @@ data "vsphere_network" "network" {
   datacenter_id = data.vsphere_datacenter.dc.id
 }
 
+data "vsphere_resource_pool" "pool" {
+  name          = var.resource_pool
+  datacenter_id = data.vsphere_datacenter.dc.id
+}
+
 data "vsphere_virtual_machine" "template" {
   name          = var.template
   datacenter_id = data.vsphere_datacenter.dc.id
 }
 
 # =============================================================================
-# GPU VM Resource
+# K3s Server VM (Control Plane)
 # =============================================================================
-resource "vsphere_virtual_machine" "gpu_vm" {
-  name             = var.vm_name
-  resource_pool_id = data.vsphere_compute_cluster.cluster.resource_pool_id
+resource "vsphere_virtual_machine" "k3s_server" {
+  name             = var.k3s_server_name
+  resource_pool_id = data.vsphere_resource_pool.pool.id
   datastore_id     = data.vsphere_datastore.datastore.id
 
-  num_cpus = var.vm_cpus
-  memory   = var.vm_memory
+  num_cpus = var.k3s_server_cpus
+  memory   = var.k3s_server_memory
 
   guest_id = data.vsphere_virtual_machine.template.guest_id
   firmware = data.vsphere_virtual_machine.template.firmware
@@ -161,7 +209,7 @@ resource "vsphere_virtual_machine" "gpu_vm" {
   # Disk
   disk {
     label            = "disk0"
-    size             = var.vm_disk_size
+    size             = var.k3s_server_disk_size
     thin_provisioned = true
   }
 
@@ -171,34 +219,28 @@ resource "vsphere_virtual_machine" "gpu_vm" {
 
     customize {
       linux_options {
-        host_name = var.vm_name
+        host_name = var.k3s_server_name
         domain    = "local"
       }
 
       network_interface {
-        ipv4_address = ""  # DHCP
+        ipv4_address = var.k3s_server_ip != "" ? var.k3s_server_ip : null
       }
     }
   }
-
-  # GPU Passthrough Configuration
-  # NOTE: This requires manual setup in vSphere to enable GPU passthrough
-  # The pci_device_id needs to be obtained from your ESXi host
-  #
-  # To find the GPU PCI device ID:
-  #   1. SSH to ESXi host
-  #   2. Run: lspci -v | grep -i nvidia
-  #   3. Note the device ID (e.g., 0000:3b:00.0)
-  #
-  # Uncomment and configure after identifying your GPU:
-  # pci_device_id = ["0000:3b:00.0"]
 
   # Cloud-init for initial setup
   extra_config = {
     "guestinfo.userdata" = base64encode(<<-EOF
       #cloud-config
+      hostname: ${var.k3s_server_name}
       users:
         - name: root
+          ssh_authorized_keys:
+            - ${var.ssh_public_key}
+        - name: k3s
+          sudo: ALL=(ALL) NOPASSWD:ALL
+          shell: /bin/bash
           ssh_authorized_keys:
             - ${var.ssh_public_key}
       package_update: true
@@ -207,6 +249,113 @@ resource "vsphere_virtual_machine" "gpu_vm" {
         - wget
         - git
         - vim
+        - htop
+        - jq
+      runcmd:
+        - echo "K3s Server VM ready for deployment" > /var/log/vm-init.log
+    EOF
+    )
+    "guestinfo.userdata.encoding" = "base64"
+  }
+
+  lifecycle {
+    ignore_changes = [
+      clone[0].customize[0].network_interface,
+    ]
+  }
+}
+
+# =============================================================================
+# K3s GPU Agent VM (Worker with GPU)
+# =============================================================================
+resource "vsphere_virtual_machine" "k3s_gpu_agent" {
+  name             = var.k3s_agent_name
+  resource_pool_id = data.vsphere_resource_pool.pool.id
+  datastore_id     = data.vsphere_datastore.datastore.id
+
+  num_cpus = var.k3s_agent_cpus
+  memory   = var.k3s_agent_memory
+
+  # Required for GPU passthrough
+  memory_reservation = var.gpu_pci_device_id != "" ? var.k3s_agent_memory : null
+
+  guest_id = data.vsphere_virtual_machine.template.guest_id
+  firmware = data.vsphere_virtual_machine.template.firmware
+
+  # Network
+  network_interface {
+    network_id   = data.vsphere_network.network.id
+    adapter_type = "vmxnet3"
+  }
+
+  # Disk
+  disk {
+    label            = "disk0"
+    size             = var.k3s_agent_disk_size
+    thin_provisioned = true
+  }
+
+  # Clone from template
+  clone {
+    template_uuid = data.vsphere_virtual_machine.template.id
+
+    customize {
+      linux_options {
+        host_name = var.k3s_agent_name
+        domain    = "local"
+      }
+
+      network_interface {
+        ipv4_address = var.k3s_agent_ip != "" ? var.k3s_agent_ip : null
+      }
+    }
+  }
+
+  # GPU Passthrough Configuration
+  # NOTE: GPU passthrough requires:
+  #   1. ESXi host configured for passthrough (esxcli system settings kernel set -s vga -v FALSE)
+  #   2. GPU marked for passthrough in vSphere UI (Host > Configure > Hardware > PCI Devices)
+  #   3. Host rebooted after enabling passthrough
+  #
+  # To find GPU PCI device ID, SSH to ESXi and run:
+  #   lspci -v | grep -i nvidia
+  #   esxcli hardware pci list | grep -A 10 -i nvidia
+  #
+  # Uncomment the following block after configuring GPU passthrough:
+  # dynamic "pci_device_id" {
+  #   for_each = var.gpu_pci_device_id != "" ? [var.gpu_pci_device_id] : []
+  #   content {
+  #     device_id = pci_device_id.value
+  #   }
+  # }
+
+  # Cloud-init for initial setup
+  extra_config = {
+    "guestinfo.userdata" = base64encode(<<-EOF
+      #cloud-config
+      hostname: ${var.k3s_agent_name}
+      users:
+        - name: root
+          ssh_authorized_keys:
+            - ${var.ssh_public_key}
+        - name: k3s
+          sudo: ALL=(ALL) NOPASSWD:ALL
+          shell: /bin/bash
+          ssh_authorized_keys:
+            - ${var.ssh_public_key}
+      package_update: true
+      packages:
+        - curl
+        - wget
+        - git
+        - vim
+        - htop
+        - jq
+        - build-essential
+        - linux-headers-generic
+      runcmd:
+        - echo "K3s GPU Agent VM ready for deployment" > /var/log/vm-init.log
+        - echo "Next: Install NVIDIA drivers and join K3s cluster" >> /var/log/vm-init.log
     EOF
     )
     "guestinfo.userdata.encoding" = "base64"
@@ -222,33 +371,111 @@ resource "vsphere_virtual_machine" "gpu_vm" {
 # =============================================================================
 # Outputs
 # =============================================================================
-output "vm_name" {
-  description = "Name of the created VM"
-  value       = vsphere_virtual_machine.gpu_vm.name
+output "k3s_server_name" {
+  description = "Name of the K3s server VM"
+  value       = vsphere_virtual_machine.k3s_server.name
 }
 
-output "vm_ip" {
-  description = "IP address of the VM"
-  value       = vsphere_virtual_machine.gpu_vm.default_ip_address
+output "k3s_server_ip" {
+  description = "IP address of the K3s server"
+  value       = vsphere_virtual_machine.k3s_server.default_ip_address
 }
 
-output "ssh_command" {
-  description = "SSH command to connect"
-  value       = "ssh root@${vsphere_virtual_machine.gpu_vm.default_ip_address}"
+output "k3s_agent_name" {
+  description = "Name of the K3s GPU agent VM"
+  value       = vsphere_virtual_machine.k3s_gpu_agent.name
+}
+
+output "k3s_agent_ip" {
+  description = "IP address of the K3s GPU agent"
+  value       = vsphere_virtual_machine.k3s_gpu_agent.default_ip_address
+}
+
+output "ssh_commands" {
+  description = "SSH commands to connect to VMs"
+  value       = <<-EOF
+
+    # Connect to K3s Server
+    ssh root@${vsphere_virtual_machine.k3s_server.default_ip_address}
+
+    # Connect to K3s GPU Agent
+    ssh root@${vsphere_virtual_machine.k3s_gpu_agent.default_ip_address}
+
+  EOF
 }
 
 output "next_steps" {
   description = "Next steps after VM creation"
   value       = <<-EOF
 
-    VM created successfully!
+    ============================================
+    VMs Created Successfully!
+    ============================================
 
-    Next steps:
-    1. Enable GPU passthrough in vSphere for this VM
-    2. Update Ansible inventory with the VM IP:
-       sed -i 's/ansible_host: .*/ansible_host: ${vsphere_virtual_machine.gpu_vm.default_ip_address}/' ../ansible/inventory/lab.yaml
-    3. Run Ansible deployment:
+    K3s Server:    ${vsphere_virtual_machine.k3s_server.name} (${vsphere_virtual_machine.k3s_server.default_ip_address})
+    K3s GPU Agent: ${vsphere_virtual_machine.k3s_gpu_agent.name} (${vsphere_virtual_machine.k3s_gpu_agent.default_ip_address})
+
+    Next Steps:
+    -----------
+    1. If using GPU passthrough, enable it in vSphere UI for ${vsphere_virtual_machine.k3s_gpu_agent.name}
+
+    2. Update Ansible inventory:
+       vim ../ansible/inventory/lab.yaml
+       # Set k3s_server_ip and k3s_agent_ip
+
+    3. Run the deployment:
        ../scripts/deploy-to-lab.sh
 
+    Or manually install K3s:
+
+    # On K3s Server:
+    ssh root@${vsphere_virtual_machine.k3s_server.default_ip_address}
+    curl -sfL https://get.k3s.io | sh -
+
+    # Get the token:
+    cat /var/lib/rancher/k3s/server/node-token
+
+    # On K3s GPU Agent:
+    ssh root@${vsphere_virtual_machine.k3s_gpu_agent.default_ip_address}
+    curl -sfL https://get.k3s.io | K3S_URL=https://${vsphere_virtual_machine.k3s_server.default_ip_address}:6443 K3S_TOKEN=<token> sh -
+
   EOF
+}
+
+# =============================================================================
+# Ansible Inventory Generation (optional)
+# =============================================================================
+resource "local_file" "ansible_inventory" {
+  filename = "${path.module}/../ansible/inventory/generated-lab.yaml"
+  content  = <<-EOF
+# Auto-generated by Terraform - do not edit manually
+# Generated: ${timestamp()}
+all:
+  vars:
+    ansible_user: root
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+    k3s_version: "v1.28.4+k3s1"
+    gpu_time_slices: 4
+    nvidia_driver_version: "535"
+
+  children:
+    k3s_servers:
+      hosts:
+        ${var.k3s_server_name}:
+          ansible_host: ${vsphere_virtual_machine.k3s_server.default_ip_address}
+          k3s_role: server
+
+    k3s_agents:
+      hosts:
+        ${var.k3s_agent_name}:
+          ansible_host: ${vsphere_virtual_machine.k3s_gpu_agent.default_ip_address}
+          k3s_role: agent
+          gpu_enabled: true
+          gpu_type: "nvidia"
+EOF
+
+  depends_on = [
+    vsphere_virtual_machine.k3s_server,
+    vsphere_virtual_machine.k3s_gpu_agent
+  ]
 }

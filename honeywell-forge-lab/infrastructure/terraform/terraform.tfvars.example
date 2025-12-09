@@ -5,25 +5,69 @@
 # vim terraform.tfvars
 #
 
-# vSphere Connection
-vsphere_server   = "vcenter.yourdomain.com"
-vsphere_user     = "administrator@vsphere.local"
-vsphere_password = "your-password-here"
+# =============================================================================
+# vSphere/ESXi Connection
+# =============================================================================
+# For standalone ESXi (not vCenter):
+vsphere_server   = "192.168.1.144"      # Your ESXi IP
+vsphere_user     = "root"                # ESXi root user
+vsphere_password = "your-password-here"  # ESXi password
 
+# =============================================================================
 # vSphere Resources
-datacenter = "Datacenter"
-cluster    = "Cluster"
-datastore  = "datastore1"
-network    = "VM Network"
+# =============================================================================
+# For standalone ESXi, use these defaults:
+datacenter    = "ha-datacenter"   # Default for standalone ESXi
+datastore     = "datastore1"      # Your datastore name
+network       = "VM Network"      # Your network name
+resource_pool = "ha-root-pool"    # Default for standalone ESXi
 
-# VM Template (Ubuntu 22.04 with cloud-init)
+# =============================================================================
+# VM Template
+# =============================================================================
+# You need a VM template with:
+#   - Ubuntu 22.04 or Rocky Linux 9
+#   - cloud-init installed
+#   - VMware Tools installed
+#
+# To create a template:
+#   1. Create a VM, install Ubuntu 22.04
+#   2. Install: apt install cloud-init open-vm-tools
+#   3. Clean: cloud-init clean
+#   4. Shutdown and convert to template
+#
 template = "ubuntu-22.04-template"
 
-# VM Configuration
-vm_name      = "forge-lab-gpu"
-vm_cpus      = 8
-vm_memory    = 32768  # 32GB
-vm_disk_size = 200    # GB
+# =============================================================================
+# K3s Server VM (Control Plane - lightweight)
+# =============================================================================
+k3s_server_name      = "k3s-server"
+k3s_server_cpus      = 4
+k3s_server_memory    = 8192   # 8GB
+k3s_server_disk_size = 100    # GB
+k3s_server_ip        = ""     # Leave empty for DHCP, or set static IP
 
-# SSH Access (paste your public key)
+# =============================================================================
+# K3s GPU Agent VM (Worker with GPU)
+# =============================================================================
+k3s_agent_name      = "k3s-gpu-agent"
+k3s_agent_cpus      = 8
+k3s_agent_memory    = 32768   # 32GB (for GPU workloads)
+k3s_agent_disk_size = 200     # GB
+k3s_agent_ip        = ""      # Leave empty for DHCP, or set static IP
+
+# =============================================================================
+# GPU Passthrough (Optional)
+# =============================================================================
+# To find your GPU PCI device ID, SSH to ESXi and run:
+#   lspci -v | grep -i nvidia
+#   esxcli hardware pci list | grep -A 10 -i nvidia
+#
+# Leave empty if you'll configure GPU passthrough manually in vSphere UI
+gpu_pci_device_id = ""
+
+# =============================================================================
+# SSH Access
+# =============================================================================
+# Paste your SSH public key (cat ~/.ssh/id_rsa.pub)
 ssh_public_key = "ssh-rsa AAAA... your-key-here"
