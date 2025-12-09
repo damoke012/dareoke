@@ -77,23 +77,24 @@ jetson_thor:
     max_queue_depth: 10               # Reject if queue > 10
 
 # ============================================================================
-# SKU 2: RTX 4000 Pro (Ada Lovelace - 20GB VRAM)
+# SKU 2: Blackwell RTX Pro 4000 (Blackwell Architecture - 20GB VRAM)
 # ============================================================================
-rtx_4000_pro:
-  description: "NVIDIA RTX 4000 Pro - Workstation GPU"
+blackwell_rtx_pro_4000:
+  description: "NVIDIA Blackwell RTX Pro 4000 - Edge Workstation GPU"
   detection:
     architecture: "x86_64"
     gpu_patterns:
-      - "RTX 4000"
-      - "RTX 4000 Ada"
-      - "AD104"  # GPU chip identifier
+      - "RTX Pro 4000"
+      - "Blackwell"
+      - "RTX 4000"        # Fallback pattern
+      - "AD104"           # GPU chip identifier (Ada fallback for dev)
 
   hardware:
     gpu_memory_gb: 20         # Dedicated VRAM
     gpu_memory_type: "dedicated"
     tdp_watts: 130
-    nvlink_available: false
-    compute_capability: "8.9"  # Ada Lovelace
+    nvlink_available: false   # NVLink NOT available on RTX Pro (only Jetson Thor)
+    compute_capability: "9.0"  # Blackwell architecture
 
   inference:
     max_concurrent_sessions: 8   # Lower than Thor due to VRAM limits
@@ -203,6 +204,57 @@ tesla_p40:
     target_ttft_p99_ms: 5000
     target_tps: 40
     max_queue_depth: 5
+
+# ============================================================================
+# Inference Backend Configuration
+# ============================================================================
+# TensorRT-LLM is primary, VLLM is fallback if model not compatible
+inference_backends:
+  primary:
+    name: "tensorrt-llm"
+    description: "NVIDIA TensorRT-LLM - optimized for NVIDIA GPUs"
+    supported: true
+    notes: "Expected to be compatible per Honeywell model requirements"
+
+  fallback:
+    name: "vllm"
+    description: "vLLM - PagedAttention-based inference"
+    supported: true
+    notes: "Fallback if TensorRT-LLM not compatible with Honeywell model"
+    config:
+      tensor_parallel_size: 1
+      max_model_len: 20480      # 20k tokens per Honeywell benchmarks
+      gpu_memory_utilization: 0.85
+      enforce_eager: false
+      trust_remote_code: true
+      dtype: "auto"             # Let vLLM choose based on model
+
+# ============================================================================
+# Thermal Throttling Configuration
+# ============================================================================
+# Per slides: "Maximum achievable concurrency and parallelism will depend on
+# the hardware's thermal throttling limits and overall compute capability"
+thermal_management:
+  monitoring_enabled: true
+  polling_interval_seconds: 5
+
+  thresholds:
+    # GPU temperature thresholds
+    warning_temp_celsius: 75
+    throttle_temp_celsius: 83
+    critical_temp_celsius: 90
+
+  actions:
+    on_warning:
+      - "log_warning"
+      - "increase_monitoring_frequency"
+    on_throttle:
+      - "reduce_batch_size"
+      - "reduce_concurrent_sessions"
+      - "alert_prometheus"
+    on_critical:
+      - "reject_new_requests"
+      - "alert_critical"
 
 # ============================================================================
 # Development/Fallback Profile

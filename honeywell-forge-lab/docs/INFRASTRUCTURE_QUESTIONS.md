@@ -2,6 +2,28 @@
 
 **Context:** These questions focus on deployment infrastructure and are **not covered** by the existing ML-focused questions (Sections A-F).
 
+**Updated:** Dec 9, 2024 - Based on kickoff presentation dependencies.
+
+---
+
+## Dependencies from Honeywell (Per Kickoff Slides)
+
+The following items were listed as **Honeywell dependencies** - these are blocking items we need:
+
+1. ☐ Forge Cognition hardware devices (Blackwell RTX Pro 4000 and Jetson Thor) with required firmware, OS image, and base runtime pre-configured
+2. ☐ Access to development units (physical or remote) for optimization, testing, validation
+3. ☐ Complete hardware specs: GPU config, RAM, storage, networking parameters, thermal limits
+4. ☐ Access to Forge Cognition unified software environment and all required runtime components
+5. ☐ Access to container registry, internal package repos, and build artifacts
+6. ☐ Existing application access for Maintenance Assist with all relevant API documentation
+7. ☐ Workflows and domain knowledge documentation
+8. ☐ Sample datasets, ground-truth data, historical logs, test inputs for benchmarking
+9. ☐ Credentials for dev environments, registries, monitoring tools, test labs, Git repos
+10. ☐ VPN or secure remote access to Forge Cognition devices and testing environments
+11. ☐ Designated point of contact for technical and functional decisions
+12. ☐ Weekly SME availability for requirement clarifications and reviews
+13. ☐ Approval workflow management for environment access, device usage, testing windows, security reviews
+
 ---
 
 ## G. Deployment Infrastructure & DevOps

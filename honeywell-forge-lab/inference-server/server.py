@@ -299,6 +299,43 @@ TARGET_TPS = Gauge(
     'Target tokens per second'
 )
 
+# Thermal monitoring gauges
+GPU_TEMPERATURE = Gauge(
+    'forge_gpu_temperature_celsius',
+    'GPU temperature in Celsius',
+    ['gpu_id']
+)
+
+GPU_POWER_USAGE = Gauge(
+    'forge_gpu_power_watts',
+    'GPU power usage in Watts',
+    ['gpu_id']
+)
+
+GPU_THERMAL_THROTTLE = Gauge(
+    'forge_gpu_thermal_throttle',
+    'GPU thermal throttling active (1=throttling, 0=normal)',
+    ['gpu_id']
+)
+
+# ============================================================================
+# Thermal Management Configuration
+# ============================================================================
+
+@dataclass
+class ThermalConfig:
+    """Thermal throttling thresholds and actions"""
+    warning_temp_celsius: float = 75.0
+    throttle_temp_celsius: float = 83.0
+    critical_temp_celsius: float = 90.0
+    polling_interval_seconds: float = 5.0
+    # Actions
+    reduce_batch_on_throttle: bool = True
+    reduce_sessions_on_throttle: bool = True
+    reject_on_critical: bool = True
+
+thermal_config = ThermalConfig()
+
 # ============================================================================
 # GPU Monitoring
 # ============================================================================
@@ -306,11 +343,19 @@ TARGET_TPS = Gauge(
 class GPUMonitor:
     def __init__(self):
         self.initialized = False
+        self.thermal_state = {}  # Track thermal state per GPU
         try:
             pynvml.nvmlInit()
             self.device_count = pynvml.nvmlDeviceGetCount()
             self.handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in range(self.device_count)]
             self.initialized = True
+            # Initialize thermal state
+            for i in range(self.device_count):
+                self.thermal_state[i] = {
+                    "is_throttling": False,
+                    "is_critical": False,
+                    "last_temp": 0.0
+                }
         except Exception as e:
             print(f"Warning: Could not initialize NVML: {e}")
             self.device_count = 0
@@ -326,13 +371,42 @@ class GPUMonitor:
                 mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
                 util = pynvml.nvmlDeviceGetUtilizationRates(handle)
 
+                # Get thermal info
+                try:
+                    temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+                except Exception:
+                    temp = 0
+
+                # Get power info
+                try:
+                    power = pynvml.nvmlDeviceGetPowerUsage(handle) / 1000.0  # mW to W
+                except Exception:
+                    power = 0
+
+                # Determine thermal state
+                is_throttling = temp >= thermal_config.throttle_temp_celsius
+                is_critical = temp >= thermal_config.critical_temp_celsius
+                is_warning = temp >= thermal_config.warning_temp_celsius
+
+                # Update thermal state tracking
+                self.thermal_state[i] = {
+                    "is_throttling": is_throttling,
+                    "is_critical": is_critical,
+                    "is_warning": is_warning,
+                    "last_temp": temp
+                }
+
                 stat = {
                     "gpu_id": i,
                     "memory_used_gb": mem_info.used / (1024**3),
                     "memory_total_gb": mem_info.total / (1024**3),
                     "memory_percent": (mem_info.used / mem_info.total) * 100,
                     "gpu_utilization": util.gpu,
-                    "memory_utilization": util.memory
+                    "memory_utilization": util.memory,
+                    # Thermal stats
+                    "temperature_celsius": temp,
+                    "power_watts": power,
+                    "thermal_state": "critical" if is_critical else "throttling" if is_throttling else "warning" if is_warning else "normal"
                 }
                 stats.append(stat)
 
@@ -340,11 +414,46 @@ class GPUMonitor:
                 GPU_MEMORY_USED.labels(gpu_id=str(i)).set(mem_info.used)
                 GPU_MEMORY_TOTAL.labels(gpu_id=str(i)).set(mem_info.total)
                 GPU_UTILIZATION.labels(gpu_id=str(i)).set(util.gpu)
+                GPU_TEMPERATURE.labels(gpu_id=str(i)).set(temp)
+                GPU_POWER_USAGE.labels(gpu_id=str(i)).set(power)
+                GPU_THERMAL_THROTTLE.labels(gpu_id=str(i)).set(1 if is_throttling else 0)
 
             except Exception as e:
                 print(f"Error getting stats for GPU {i}: {e}")
 
         return stats
+
+    def is_any_gpu_throttling(self) -> bool:
+        """Check if any GPU is in thermal throttling state"""
+        return any(state.get("is_throttling", False) for state in self.thermal_state.values())
+
+    def is_any_gpu_critical(self) -> bool:
+        """Check if any GPU is in critical thermal state"""
+        return any(state.get("is_critical", False) for state in self.thermal_state.values())
+
+    def get_thermal_summary(self) -> Dict:
+        """Get summary of thermal state across all GPUs"""
+        if not self.initialized:
+            return {"status": "unknown", "gpus": []}
+
+        return {
+            "status": "critical" if self.is_any_gpu_critical() else "throttling" if self.is_any_gpu_throttling() else "normal",
+            "any_throttling": self.is_any_gpu_throttling(),
+            "any_critical": self.is_any_gpu_critical(),
+            "thresholds": {
+                "warning_celsius": thermal_config.warning_temp_celsius,
+                "throttle_celsius": thermal_config.throttle_temp_celsius,
+                "critical_celsius": thermal_config.critical_temp_celsius
+            },
+            "gpus": [
+                {
+                    "gpu_id": i,
+                    "temperature": state.get("last_temp", 0),
+                    "state": "critical" if state.get("is_critical") else "throttling" if state.get("is_throttling") else "warning" if state.get("is_warning") else "normal"
+                }
+                for i, state in self.thermal_state.items()
+            ]
+        }
 
     def shutdown(self):
         if self.initialized:
@@ -693,6 +802,40 @@ async def gpu_stats():
     return {
         "gpu_count": gpu_monitor.device_count,
         "gpus": gpu_monitor.get_gpu_stats()
+    }
+
+@app.get("/v1/gpu/thermal")
+async def gpu_thermal():
+    """
+    Get GPU thermal status and throttling information.
+    Per kickoff slides: "Maximum achievable concurrency and parallelism will
+    depend on the hardware's thermal throttling limits"
+    """
+    # Refresh stats
+    gpu_monitor.get_gpu_stats()
+
+    thermal_summary = gpu_monitor.get_thermal_summary()
+
+    # Add recommendations based on thermal state
+    recommendations = []
+    if thermal_summary.get("any_critical"):
+        recommendations.append("CRITICAL: Reject new requests, allow current to complete")
+        recommendations.append("Check cooling system and ambient temperature")
+    elif thermal_summary.get("any_throttling"):
+        recommendations.append("Reduce max_concurrent_sessions temporarily")
+        recommendations.append("Reduce batch size for new requests")
+        recommendations.append("Monitor for sustained throttling")
+    elif any(gpu.get("state") == "warning" for gpu in thermal_summary.get("gpus", [])):
+        recommendations.append("Approaching thermal limits, monitor closely")
+
+    return {
+        **thermal_summary,
+        "recommendations": recommendations,
+        "actions_configured": {
+            "reduce_batch_on_throttle": thermal_config.reduce_batch_on_throttle,
+            "reduce_sessions_on_throttle": thermal_config.reduce_sessions_on_throttle,
+            "reject_on_critical": thermal_config.reject_on_critical
+        }
     }
 
 @app.get("/metrics")
