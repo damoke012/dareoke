@@ -1,0 +1,87 @@
+# Honeywell Forge Cognition - Lab Inventory
+# Configure your lab machines here
+#
+# Usage:
+#   ansible-playbook -i inventory/lab.yaml playbooks/deploy-all.yaml
+#
+---
+all:
+  vars:
+    # Global settings
+    ansible_user: root
+    ansible_ssh_private_key_file: ~/.ssh/id_rsa
+    ansible_python_interpreter: /usr/bin/python3
+
+    # K3s settings
+    k3s_version: "v1.28.4+k3s1"
+
+    # GPU settings
+    gpu_time_slices: 4
+    nvidia_driver_version: "535"
+    cuda_version: "12.2"
+
+    # Forge Cognition settings
+    forge_namespace: "forge-cognition"
+    forge_image: "forge/inference-server:latest"
+    model_path: "/opt/forge/models"
+
+  children:
+    # ==========================================================================
+    # Lab Environment (Tesla P40)
+    # ==========================================================================
+    lab:
+      hosts:
+        # UPDATE THIS with your ESXi VM IP
+        lab-gpu-01:
+          ansible_host: 192.168.1.100  # <-- CHANGE THIS
+          gpu_type: "tesla_p40"
+          gpu_memory_gb: 24
+          sku_profile: "tesla_p40"
+
+      vars:
+        environment: "lab"
+        k3s_node_labels:
+          - "node-role.kubernetes.io/gpu=true"
+          - "nvidia.com/gpu.present=true"
+          - "forge.honeywell.com/sku=tesla-p40"
+
+    # ==========================================================================
+    # Future: Jetson Thor (when available)
+    # ==========================================================================
+    jetson:
+      hosts:
+        # jetson-thor-01:
+        #   ansible_host: 192.168.1.101
+        #   gpu_type: "jetson_thor"
+        #   gpu_memory_gb: 128
+        #   sku_profile: "jetson_thor"
+      vars:
+        environment: "edge"
+        ansible_user: nvidia  # Jetson default user
+
+    # ==========================================================================
+    # Future: RTX Pro 4000 (when available)
+    # ==========================================================================
+    rtx:
+      hosts:
+        # rtx-pro-01:
+        #   ansible_host: 192.168.1.102
+        #   gpu_type: "rtx_pro_4000"
+        #   gpu_memory_gb: 20
+        #   sku_profile: "blackwell_rtx_pro_4000"
+      vars:
+        environment: "edge"
+
+    # ==========================================================================
+    # Groupings
+    # ==========================================================================
+    gpu_nodes:
+      children:
+        lab:
+        jetson:
+        rtx:
+
+    k3s_servers:
+      children:
+        lab:
+        # Add more as needed

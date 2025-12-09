@@ -1,0 +1,384 @@
+# Honeywell Forge Cognition - Full Deployment Playbook
+# Deploys complete stack: K3s + GPU support + Forge Cognition
+#
+# Usage:
+#   # Full deployment
+#   ansible-playbook -i inventory/lab.yaml playbooks/deploy-all.yaml
+#
+#   # Only K3s + GPU
+#   ansible-playbook -i inventory/lab.yaml playbooks/deploy-all.yaml --tags k3s,gpu
+#
+#   # Only Forge application
+#   ansible-playbook -i inventory/lab.yaml playbooks/deploy-all.yaml --tags forge
+#
+---
+- name: Deploy Forge Cognition Infrastructure
+  hosts: gpu_nodes
+  become: yes
+  gather_facts: yes
+
+  vars:
+    # Can be overridden in inventory or command line
+    skip_reboot: false
+    force_reinstall: false
+
+  pre_tasks:
+    - name: Display target information
+      debug:
+        msg: |
+          Deploying to: {{ inventory_hostname }}
+          GPU Type: {{ gpu_type | default('unknown') }}
+          Environment: {{ environment | default('lab') }}
+
+    - name: Check connectivity
+      ping:
+
+  tasks:
+    # ==========================================================================
+    # Phase 1: Base System Setup
+    # ==========================================================================
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+      tags: [base, always]
+
+    - name: Install base packages
+      apt:
+        name:
+          - curl
+          - wget
+          - git
+          - htop
+          - iotop
+          - vim
+          - jq
+          - python3-pip
+          - ca-certificates
+          - gnupg
+          - lsb-release
+        state: present
+      when: ansible_os_family == "Debian"
+      tags: [base]
+
+    - name: Disable swap
+      shell: |
+        swapoff -a
+        sed -i '/swap/d' /etc/fstab
+      changed_when: false
+      tags: [base, k3s]
+
+    # ==========================================================================
+    # Phase 2: NVIDIA Drivers (if not present)
+    # ==========================================================================
+    - name: Check if NVIDIA driver is installed
+      command: nvidia-smi
+      register: nvidia_check
+      ignore_errors: yes
+      changed_when: false
+      tags: [gpu]
+
+    - name: Install NVIDIA drivers
+      block:
+        - name: Add NVIDIA repository key
+          apt_key:
+            url: https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/3bf863cc.pub
+            state: present
+
+        - name: Add NVIDIA CUDA repository
+          apt_repository:
+            repo: "deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/ /"
+            state: present
+            filename: cuda
+
+        - name: Install NVIDIA driver
+          apt:
+            name: "nvidia-driver-{{ nvidia_driver_version }}"
+            state: present
+            update_cache: yes
+
+        - name: Reboot after driver install
+          reboot:
+            reboot_timeout: 300
+          when: not skip_reboot
+      when: nvidia_check.rc != 0
+      tags: [gpu]
+
+    - name: Verify NVIDIA driver
+      command: nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
+      register: gpu_info
+      changed_when: false
+      tags: [gpu]
+
+    - name: Display GPU info
+      debug:
+        msg: "GPU: {{ gpu_info.stdout }}"
+      tags: [gpu]
+
+    # ==========================================================================
+    # Phase 3: NVIDIA Container Toolkit
+    # ==========================================================================
+    - name: Check if nvidia-ctk is installed
+      command: nvidia-ctk --version
+      register: ctk_check
+      ignore_errors: yes
+      changed_when: false
+      tags: [gpu]
+
+    - name: Install NVIDIA Container Toolkit
+      block:
+        - name: Add NVIDIA Container Toolkit repository
+          shell: |
+            distribution=$(. /etc/os-release; echo $ID$VERSION_ID)
+            curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+            curl -s -L https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.list | \
+              sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+              tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+          args:
+            creates: /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+        - name: Install nvidia-container-toolkit
+          apt:
+            name: nvidia-container-toolkit
+            state: present
+            update_cache: yes
+      when: ctk_check.rc != 0
+      tags: [gpu]
+
+    # ==========================================================================
+    # Phase 4: K3s Installation
+    # ==========================================================================
+    - name: Check if K3s is installed
+      stat:
+        path: /usr/local/bin/k3s
+      register: k3s_binary
+      tags: [k3s]
+
+    - name: Install K3s
+      block:
+        - name: Download and install K3s
+          shell: |
+            curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ k3s_version }}" sh -s - \
+              --write-kubeconfig-mode 644 \
+              --disable traefik \
+              --disable servicelb \
+              --kubelet-arg="feature-gates=DevicePlugins=true"
+          args:
+            creates: /usr/local/bin/k3s
+
+        - name: Wait for K3s to be ready
+          command: kubectl get nodes
+          register: k3s_ready
+          until: k3s_ready.rc == 0
+          retries: 30
+          delay: 10
+          environment:
+            KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      when: not k3s_binary.stat.exists or force_reinstall
+      tags: [k3s]
+
+    - name: Set KUBECONFIG in profile
+      lineinfile:
+        path: /etc/profile.d/k3s.sh
+        line: 'export KUBECONFIG=/etc/rancher/k3s/k3s.yaml'
+        create: yes
+        mode: '0644'
+      tags: [k3s]
+
+    - name: Apply node labels
+      command: "kubectl label node {{ inventory_hostname }} {{ item }} --overwrite"
+      loop: "{{ k3s_node_labels | default([]) }}"
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+      tags: [k3s]
+
+    # ==========================================================================
+    # Phase 5: Configure containerd for NVIDIA
+    # ==========================================================================
+    - name: Create containerd config directory
+      file:
+        path: /var/lib/rancher/k3s/agent/etc/containerd
+        state: directory
+        mode: '0755'
+      tags: [gpu, k3s]
+
+    - name: Configure containerd for NVIDIA runtime
+      copy:
+        dest: /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
+        content: |
+          [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia]
+            privileged_without_host_devices = false
+            runtime_engine = ""
+            runtime_root = ""
+            runtime_type = "io.containerd.runc.v2"
+          [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia.options]
+            BinaryName = "/usr/bin/nvidia-container-runtime"
+        mode: '0644'
+      notify: Restart K3s
+      tags: [gpu, k3s]
+
+    - name: Create NVIDIA RuntimeClass
+      shell: |
+        kubectl apply -f - <<EOF
+        apiVersion: node.k8s.io/v1
+        kind: RuntimeClass
+        metadata:
+          name: nvidia
+        handler: nvidia
+        EOF
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+      tags: [gpu, k3s]
+
+    # ==========================================================================
+    # Phase 6: NVIDIA Device Plugin with Time-Slicing
+    # ==========================================================================
+    - name: Install Helm
+      shell: |
+        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      args:
+        creates: /usr/local/bin/helm
+      tags: [gpu, helm]
+
+    - name: Add NVIDIA Helm repo
+      command: helm repo add nvdp https://nvidia.github.io/k8s-device-plugin
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+      tags: [gpu]
+
+    - name: Update Helm repos
+      command: helm repo update
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+      tags: [gpu]
+
+    - name: Create nvidia-device-plugin namespace
+      shell: |
+        kubectl create namespace nvidia-device-plugin --dry-run=client -o yaml | kubectl apply -f -
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+      tags: [gpu]
+
+    - name: Create time-slicing ConfigMap
+      shell: |
+        kubectl apply -f - <<EOF
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: nvidia-device-plugin-config
+          namespace: nvidia-device-plugin
+        data:
+          config.yaml: |
+            version: v1
+            flags:
+              migStrategy: none
+            sharing:
+              timeSlicing:
+                renameByDefault: false
+                failRequestsGreaterThanOne: false
+                resources:
+                  - name: nvidia.com/gpu
+                    replicas: {{ gpu_time_slices }}
+        EOF
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+      tags: [gpu]
+
+    - name: Install NVIDIA Device Plugin
+      command: >
+        helm upgrade --install nvidia-device-plugin nvdp/nvidia-device-plugin
+        --namespace nvidia-device-plugin
+        --set config.name=nvidia-device-plugin-config
+        --set runtimeClassName=nvidia
+        --wait
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+      tags: [gpu]
+
+    - name: Wait for device plugin to be ready
+      command: kubectl rollout status daemonset/nvidia-device-plugin -n nvidia-device-plugin --timeout=120s
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      tags: [gpu]
+
+    # ==========================================================================
+    # Phase 7: Deploy Forge Cognition
+    # ==========================================================================
+    - name: Create Forge namespace
+      shell: |
+        kubectl create namespace {{ forge_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+      tags: [forge]
+
+    - name: Create model storage directory
+      file:
+        path: "{{ model_path }}"
+        state: directory
+        mode: '0755'
+      tags: [forge]
+
+    - name: Copy Forge manifests
+      copy:
+        src: "{{ playbook_dir }}/../../k3s-deployment/manifests/"
+        dest: /opt/forge/manifests/
+        mode: '0644'
+      tags: [forge]
+
+    - name: Apply Forge manifests
+      shell: |
+        kubectl apply -f /opt/forge/manifests/namespace.yaml
+        kubectl apply -f /opt/forge/manifests/priority-class.yaml
+        kubectl apply -f /opt/forge/manifests/resource-quota.yaml
+        kubectl apply -f /opt/forge/manifests/storage.yaml
+        kubectl apply -f /opt/forge/manifests/inference-configmap.yaml
+        kubectl apply -f /opt/forge/manifests/inference-deployment.yaml
+        kubectl apply -f /opt/forge/manifests/pod-disruption-budget.yaml
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+      tags: [forge]
+
+    # ==========================================================================
+    # Phase 8: Verification
+    # ==========================================================================
+    - name: Verify GPU allocation
+      command: kubectl get nodes -o custom-columns='NAME:.metadata.name,GPU:.status.allocatable.nvidia\.com/gpu'
+      register: gpu_allocation
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+      tags: [verify]
+
+    - name: Display GPU allocation
+      debug:
+        msg: "{{ gpu_allocation.stdout_lines }}"
+      tags: [verify]
+
+    - name: Get all pods
+      command: kubectl get pods -A
+      register: all_pods
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+      tags: [verify]
+
+    - name: Display pods
+      debug:
+        msg: "{{ all_pods.stdout_lines }}"
+      tags: [verify]
+
+  handlers:
+    - name: Restart K3s
+      systemd:
+        name: k3s
+        state: restarted

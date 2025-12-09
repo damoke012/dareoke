@@ -1,0 +1,29 @@
+# Honeywell Forge Cognition - Terraform Variables
+# Copy this file to terraform.tfvars and fill in your values
+#
+# cp terraform.tfvars.example terraform.tfvars
+# vim terraform.tfvars
+#
+
+# vSphere Connection
+vsphere_server   = "vcenter.yourdomain.com"
+vsphere_user     = "administrator@vsphere.local"
+vsphere_password = "your-password-here"
+
+# vSphere Resources
+datacenter = "Datacenter"
+cluster    = "Cluster"
+datastore  = "datastore1"
+network    = "VM Network"
+
+# VM Template (Ubuntu 22.04 with cloud-init)
+template = "ubuntu-22.04-template"
+
+# VM Configuration
+vm_name      = "forge-lab-gpu"
+vm_cpus      = 8
+vm_memory    = 32768  # 32GB
+vm_disk_size = 200    # GB
+
+# SSH Access (paste your public key)
+ssh_public_key = "ssh-rsa AAAA... your-key-here"
