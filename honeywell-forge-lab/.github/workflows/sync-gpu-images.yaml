@@ -1,0 +1,199 @@
+# Sync GPU Operator Images for Airgapped Deployments
+#
+# This workflow downloads all NVIDIA GPU Operator images and:
+#   1. Creates a GitHub Release with tar files
+#   2. Optionally pushes to a private registry
+#
+# The release artifacts can be downloaded and imported on airgapped K3s nodes.
+
+name: Sync GPU Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      gpu_operator_version:
+        description: 'GPU Operator version'
+        required: false
+        default: 'v25.10.1'
+      driver_version:
+        description: 'NVIDIA driver version'
+        required: false
+        default: '580.105.08'
+      create_release:
+        description: 'Create GitHub Release with images'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+  schedule:
+    # Run weekly to keep images fresh
+    - cron: '0 2 * * 0'
+
+env:
+  GPU_OPERATOR_VERSION: ${{ github.event.inputs.gpu_operator_version || 'v25.10.1' }}
+  DRIVER_VERSION: ${{ github.event.inputs.driver_version || '580.105.08' }}
+
+jobs:
+  sync-images:
+    name: Download GPU Operator Images
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          df -h
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman skopeo
+
+      - name: Define images to sync
+        id: images
+        run: |
+          cat > /tmp/images.txt << 'EOF'
+          nvcr.io/nvidia/gpu-operator:${{ env.GPU_OPERATOR_VERSION }}
+          nvcr.io/nvidia/cloud-native/k8s-driver-manager:v0.9.1
+          nvcr.io/nvidia/driver:${{ env.DRIVER_VERSION }}-ubuntu20.04
+          nvcr.io/nvidia/k8s/container-toolkit:v1.18.1
+          nvcr.io/nvidia/k8s-device-plugin:v0.18.1
+          nvcr.io/nvidia/k8s/dcgm-exporter:4.4.2-4.7.0-distroless
+          registry.k8s.io/nfd/node-feature-discovery:v0.18.2
+          nvcr.io/nvidia/cuda:12.2.0-base-ubuntu22.04
+          EOF
+          echo "count=$(wc -l < /tmp/images.txt)" >> $GITHUB_OUTPUT
+
+      - name: Pull all images
+        run: |
+          mkdir -p gpu-images
+          while IFS= read -r img; do
+            echo "Pulling: $img"
+            podman pull "$img" || echo "Failed: $img"
+          done < /tmp/images.txt
+
+      - name: Save images to tar files
+        run: |
+          # Save each image individually (more reliable for large images)
+          while IFS= read -r img; do
+            name=$(echo "$img" | sed 's|.*/||' | sed 's/:/-/g')
+            echo "Saving: $img -> gpu-images/${name}.tar"
+            podman save -o "gpu-images/${name}.tar" "$img" || echo "Failed: $img"
+          done < /tmp/images.txt
+
+          # Create checksums
+          cd gpu-images
+          sha256sum *.tar > checksums.sha256
+
+          # Create manifest
+          cat > manifest.md << EOF
+          # GPU Operator Images
+
+          **GPU Operator Version:** ${{ env.GPU_OPERATOR_VERSION }}
+          **Driver Version:** ${{ env.DRIVER_VERSION }}
+          **Generated:** $(date)
+
+          ## Images Included
+
+          $(cat /tmp/images.txt | sed 's/^/- /')
+
+          ## Usage on Airgapped K3s Node
+
+          \`\`\`bash
+          # Download all tar files to /tmp/gpu-images
+
+          # Import into K3s
+          for f in /tmp/gpu-images/*.tar; do
+            sudo k3s ctr images import "\$f"
+          done
+
+          # Verify
+          sudo k3s ctr images list | grep nvidia
+          \`\`\`
+          EOF
+
+      - name: List saved images
+        run: |
+          echo "=== Saved Images ==="
+          ls -lh gpu-images/
+          echo ""
+          echo "=== Total Size ==="
+          du -sh gpu-images/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-operator-images-${{ env.GPU_OPERATOR_VERSION }}
+          path: gpu-images/
+          retention-days: 30
+
+      - name: Create Release
+        if: github.event.inputs.create_release == 'true'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: gpu-images-${{ env.GPU_OPERATOR_VERSION }}
+          name: GPU Operator Images ${{ env.GPU_OPERATOR_VERSION }}
+          body_path: gpu-images/manifest.md
+          files: |
+            gpu-images/*.tar
+            gpu-images/checksums.sha256
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        run: |
+          echo "## GPU Images Synced!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| GPU Operator | ${{ env.GPU_OPERATOR_VERSION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Driver | ${{ env.DRIVER_VERSION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Images | ${{ steps.images.outputs.count }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Download" >> $GITHUB_STEP_SUMMARY
+          echo "Download the artifacts or release to transfer to airgapped environment." >> $GITHUB_STEP_SUMMARY
+
+  # Optional: Push to private registry
+  push-to-registry:
+    name: Push to Private Registry
+    runs-on: ubuntu-latest
+    needs: sync-images
+    if: github.event.inputs.registry_url != ''
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: gpu-operator-images-${{ env.GPU_OPERATOR_VERSION }}
+          path: gpu-images/
+
+      - name: Push to registry
+        if: env.REGISTRY_URL != ''
+        env:
+          REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: |
+          # Login
+          echo "$REGISTRY_PASSWORD" | podman login "${REGISTRY_URL%%/*}" -u "$REGISTRY_USER" --password-stdin
+
+          # Load and push each image
+          for tar_file in gpu-images/*.tar; do
+            podman load -i "$tar_file"
+          done
+
+          # Tag and push
+          for img in $(podman images --format "{{.Repository}}:{{.Tag}}" | grep -E "nvcr.io|registry.k8s.io"); do
+            dst="${REGISTRY_URL}/$(basename $img)"
+            podman tag "$img" "$dst"
+            podman push "$dst" --tls-verify=false
+          done
