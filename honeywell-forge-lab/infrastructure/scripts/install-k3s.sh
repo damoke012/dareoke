@@ -210,14 +210,8 @@ install_k3s_server() {
 
     # Install K3s
     log_info "Installing K3s server (this may take a minute)..."
-    vm_sudo_cmd "${ip}" '
-        mkdir -p /usr/local/bin
-
-        cp /tmp/k3s /usr/local/bin/k3s
-        chmod +x /usr/local/bin/k3s
-
-        INSTALL_K3S_SKIP_DOWNLOAD=true /tmp/install.sh --write-kubeconfig-mode 644
-    '
+    vm_sudo_cmd "${ip}" "mkdir -p /usr/local/bin && cp /tmp/k3s /usr/local/bin/k3s && chmod +x /usr/local/bin/k3s"
+    vm_sudo_cmd "${ip}" "INSTALL_K3S_SKIP_DOWNLOAD=true /tmp/install.sh --write-kubeconfig-mode 644"
 
     # Wait for K3s to be ready
     log_info "Waiting for K3s server to be ready..."
@@ -290,14 +284,19 @@ install_k3s_agent() {
 
     # Install K3s agent
     log_info "Installing K3s agent..."
-    vm_sudo_cmd "${ip}" "
-        mkdir -p /usr/local/bin
 
-        cp /tmp/k3s /usr/local/bin/k3s
-        chmod +x /usr/local/bin/k3s
+    # Write the environment file first to avoid shell escaping issues
+    vm_sudo_cmd "${ip}" "mkdir -p /usr/local/bin && cp /tmp/k3s /usr/local/bin/k3s && chmod +x /usr/local/bin/k3s"
 
-        INSTALL_K3S_SKIP_DOWNLOAD=true K3S_URL='https://${server_ip}:6443' K3S_TOKEN='${token}' /tmp/install.sh
-    "
+    # Create env file with proper escaping
+    vm_sudo_cmd "${ip}" "cat > /tmp/k3s-agent-env.sh << 'ENVEOF'
+export INSTALL_K3S_SKIP_DOWNLOAD=true
+export K3S_URL=https://${server_ip}:6443
+export K3S_TOKEN=${token}
+ENVEOF"
+
+    # Source env and run install
+    vm_sudo_cmd "${ip}" "source /tmp/k3s-agent-env.sh && /tmp/install.sh"
 
     log_info "K3s agent installation complete"
 }
