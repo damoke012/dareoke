@@ -239,11 +239,23 @@ get_k3s_token() {
     local retries=10
 
     for ((i=1; i<=retries; i++)); do
-        token=$(vm_sudo_cmd "${ip}" "cat /var/lib/rancher/k3s/server/node-token 2>/dev/null" | { grep -v "^\[sudo\]" || true; } | tail -1) || true
+        # Get raw output first for debugging
+        local raw_output
+        raw_output=$(vm_sudo_cmd "${ip}" "cat /var/lib/rancher/k3s/server/node-token") || true
+
+        # Extract just the token line (starts with K10)
+        token=$(echo "$raw_output" | grep "^K10" | head -1) || true
+
         if [[ -n "$token" && "$token" == K* ]]; then
             echo "$token"
             return 0
         fi
+
+        # Print debug info on first attempt
+        if [[ $i -eq 1 ]]; then
+            echo -e "${YELLOW}[DEBUG]${NC} Raw output: '${raw_output:0:100}...'" >&2
+        fi
+
         # Print to stderr so it doesn't get captured in command substitution
         echo -e "${GREEN}[INFO]${NC} Waiting for token (attempt $i/$retries)..." >&2
         sleep 3
