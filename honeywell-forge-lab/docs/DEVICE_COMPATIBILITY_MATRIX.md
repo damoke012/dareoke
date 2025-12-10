@@ -493,6 +493,169 @@ sudo nvidia-smi -pl 120  # Limit to 120W
 
 ---
 
+# CRITICAL: TensorRT-LLM Jetson Compatibility Issues
+
+## The Problem
+
+**TensorRT-LLM has significant compatibility issues with Jetson platforms (SM 8.7 architecture).**
+
+As of December 2024, TensorRT-LLM on Jetson is in **PREVIEW STATUS** with known limitations:
+
+| Issue | Description | Impact |
+|-------|-------------|--------|
+| **Missing SM_87 Kernels** | Fused MHA kernels not compiled for Jetson | Falls back to slower unfused attention |
+| **Preview Release Only** | v0.12.0-jetson branch is preview, not production | Stability not guaranteed |
+| **Limited Testing** | NVIDIA still validating various settings | May encounter unexpected issues |
+| **Accuracy Degradation** | Users report accuracy drops (97% → 89-93%) | Model quality may suffer |
+
+### Specific Errors You May See
+
+```
+[TensorRT-LLM][WARNING] Fall back to unfused MHA because of unsupported head size 128 in sm_87
+```
+
+This warning indicates the optimized attention kernels are NOT available, resulting in:
+- **Slower inference** (unfused attention is less efficient)
+- **Higher memory usage**
+- **Potential accuracy issues**
+
+### Root Cause
+
+From [NVIDIA GitHub Issue #1516](https://github.com/NVIDIA/TensorRT-LLM/issues/1516):
+> "TensorRT-LLM does not have the sm 87 fused mha kernels now."
+
+The SM 8.7 (Jetson Orin/Thor) architecture kernels are simply not included in the standard builds.
+
+---
+
+## Our Mitigation Strategy
+
+### Option 1: Use MLC LLM (Recommended for Jetson)
+
+[MLC LLM](https://www.jetson-ai-lab.com/benchmarks.html) is already optimized for Jetson and near peak theoretical performance:
+
+| Framework | Jetson Support | Performance | Stability |
+|-----------|---------------|-------------|-----------|
+| **MLC LLM** | ✅ Excellent | Near peak | Production ready |
+| **llama.cpp** | ✅ Good | Good | Production ready |
+| **TensorRT-LLM** | ⚠️ Preview | Best (when working) | Preview only |
+| **vLLM** | ⚠️ Limited | Good | Compilation issues |
+
+**Recommendation:** Use MLC LLM as primary backend on Jetson, with TensorRT-LLM as optional for specific models that work well.
+
+### Option 2: Use TensorRT-LLM Preview with Caution
+
+If TensorRT-LLM is required (per Quantiphi), follow these guidelines:
+
+```yaml
+# Jetson TensorRT-LLM Requirements
+jetson_tensorrt_llm:
+  version: "0.12.0-jetson"  # Use Jetson-specific branch
+  jetpack: "6.1"            # L4T r36.4 required
+  container: "dustynv/tensorrt_llm:0.12-r36.4.0"
+
+  # Workarounds
+  workarounds:
+    - Use smaller batch sizes (reduce memory pressure)
+    - Use FP16 instead of FP8 if accuracy issues
+    - Test model accuracy before production
+    - Monitor for fallback warnings in logs
+```
+
+### Option 3: Hybrid Approach (Best)
+
+Use different backends for different platforms:
+
+| Platform | Primary Backend | Fallback Backend |
+|----------|-----------------|------------------|
+| **Jetson Thor** | MLC LLM | TensorRT-LLM (if working) |
+| **RTX Pro 4000** | TensorRT-LLM | vLLM |
+
+This ensures:
+- Production stability on Jetson with MLC
+- Maximum performance on x86 with TensorRT-LLM
+- Consistent API across platforms (both support OpenAI-compatible endpoints)
+
+---
+
+## Implementation Plan
+
+### Phase 1: Validate on Lab (Tesla P40)
+- Test TensorRT-LLM on x86 first
+- Establish baseline performance
+- Verify model conversion works
+
+### Phase 2: Test on RTX Pro 4000
+- Deploy TensorRT-LLM (should work well)
+- Benchmark performance
+- Validate accuracy
+
+### Phase 3: Test on Jetson Thor
+- Start with MLC LLM (stable)
+- Attempt TensorRT-LLM preview
+- Compare accuracy and performance
+- Make final decision on backend
+
+### Phase 4: Unified Deployment
+- Abstract backend behind common API
+- Use Triton Inference Server for both
+- Configure per-platform backend selection
+
+---
+
+## Jetson-Specific Alternatives
+
+### MLC LLM Setup (Recommended)
+
+```bash
+# Pull MLC container for Jetson
+docker pull dustynv/mlc:0.1.0-r36.2.0
+
+# Run with model
+docker run --runtime nvidia -it --rm \
+  -v /path/to/models:/models \
+  dustynv/mlc:0.1.0-r36.2.0 \
+  python3 -m mlc_llm serve /models/llama-7b-q4f16_1
+```
+
+### llama.cpp Setup (Stable Alternative)
+
+```bash
+# Pull llama.cpp container for Jetson
+docker pull dustynv/llama_cpp:0.2.57-r36.2.0
+
+# Run server
+docker run --runtime nvidia -it --rm \
+  -v /path/to/models:/models \
+  -p 8080:8080 \
+  dustynv/llama_cpp:0.2.57-r36.2.0 \
+  --server -m /models/model.gguf --port 8080
+```
+
+### Performance Comparison (Jetson AGX Orin 64GB)
+
+| Model | MLC (tok/s) | llama.cpp (tok/s) | TensorRT-LLM (tok/s) |
+|-------|-------------|-------------------|----------------------|
+| Llama-2-7B (INT4) | ~45 | ~35 | ~50* |
+| Llama-2-13B (INT4) | ~25 | ~20 | ~30* |
+| Mistral-7B (INT4) | ~48 | ~38 | ~55* |
+
+*TensorRT-LLM performance when working correctly; may be lower with unfused MHA fallback.
+
+---
+
+## Questions for Honeywell/Quantiphi
+
+Before finalizing the Jetson deployment strategy:
+
+1. **Is TensorRT-LLM mandatory?** Or can we use MLC/llama.cpp on Jetson?
+2. **What accuracy tolerance is acceptable?** (TensorRT-LLM preview may have ~5-8% accuracy drop)
+3. **Have you tested TensorRT-LLM on Jetson Thor specifically?**
+4. **What JetPack version will be on the production devices?**
+5. **Is there a timeline for TensorRT-LLM SM_87 kernel support?**
+
+---
+
 # Known Limitations
 
 ## Jetson AGX Thor
@@ -502,17 +665,23 @@ sudo nvidia-smi -pl 120  # Limit to 120W
    - Some x86 Python packages may not be available
    - TensorRT-LLM must be built from source
 
-2. **Unified Memory**
+2. **TensorRT-LLM Compatibility (CRITICAL)**
+   - SM_87 fused MHA kernels NOT available
+   - Preview release only (v0.12.0-jetson)
+   - May have accuracy degradation
+   - Consider MLC LLM as alternative
+
+3. **Unified Memory**
    - CPU and GPU share memory pool
    - Memory contention possible under high load
    - Different allocation strategy than discrete GPUs
 
-3. **JetPack Dependency**
+4. **JetPack Dependency**
    - Must match exact JetPack version for all components
    - Upgrades require full JetPack update
    - Limited to NVIDIA-provided CUDA/TensorRT versions
 
-4. **Thermal Constraints**
+5. **Thermal Constraints**
    - Edge deployment may have limited cooling
    - Sustained 100W requires adequate airflow
    - May need to use lower power modes
