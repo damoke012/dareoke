@@ -239,7 +239,7 @@ get_k3s_token() {
     local retries=10
 
     for ((i=1; i<=retries; i++)); do
-        token=$(vm_sudo_cmd "${ip}" "cat /var/lib/rancher/k3s/server/node-token 2>/dev/null" | grep -v "^\[sudo\]" | tail -1)
+        token=$(vm_sudo_cmd "${ip}" "cat /var/lib/rancher/k3s/server/node-token 2>/dev/null" | { grep -v "^\[sudo\]" || true; } | tail -1)
         if [[ -n "$token" && "$token" == K* ]]; then
             echo "$token"
             return 0
