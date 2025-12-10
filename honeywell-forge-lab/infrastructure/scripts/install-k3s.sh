@@ -79,7 +79,10 @@ vm_cmd() {
 vm_sudo_cmd() {
     local ip="$1"
     local cmd="$2"
-    sshpass -p "${VM_PASSWORD}" ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=10 "${VM_USER}@${ip}" "echo '${VM_PASSWORD}' | sudo -S bash -c '$cmd'" 2>&1 | { grep -v "^\[sudo\] password" || true; }
+    # Use base64 encoding to safely pass password with special characters
+    local encoded_pass
+    encoded_pass=$(echo -n "${VM_PASSWORD}" | base64)
+    sshpass -p "${VM_PASSWORD}" ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=10 "${VM_USER}@${ip}" "echo ${encoded_pass} | base64 -d | sudo -S bash -c '$cmd'" 2>&1 | { grep -v "^\[sudo\] password" || true; }
 }
 
 vm_copy() {
