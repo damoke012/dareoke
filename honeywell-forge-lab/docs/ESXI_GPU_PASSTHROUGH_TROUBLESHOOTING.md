@@ -269,6 +269,160 @@ sudo reboot
 
 ---
 
+## SOLUTION: EFI Firmware VM (RESOLVED)
+
+The BAR1 unassigned issue was **RESOLVED** by creating an EFI-based VM instead of BIOS-based.
+
+### Root Cause
+BIOS firmware cannot allocate 64-bit address space for GPU BARs larger than 4GB. The Tesla P40 has a 32GB BAR1 (GPU memory aperture) that requires 64-bit addressing.
+
+### Solution
+Create the GPU VM with **EFI firmware** instead of BIOS:
+```vmx
+firmware = "efi"
+```
+
+### Working EFI VM Details
+
+| Component | Details |
+|-----------|---------|
+| VM Name | k3s-gpu-efi |
+| VMID | 126 |
+| IP Address | 192.168.22.96 |
+| Firmware | EFI |
+| GPU BAR1 | Properly mapped at 1ff000000000 (32GB) |
+
+### Verified Working BAR Mapping
+```bash
+$ lspci -vvv -s 0b:00.0 | grep Region
+Region 0: Memory at fd000000 (32-bit, non-prefetchable) [size=16M]
+Region 1: Memory at 1ff000000000 (64-bit, prefetchable) [size=32G]   # <-- CORRECT!
+Region 3: Memory at 1fffe0000000 (64-bit, prefetchable) [size=32M]
+```
+
+### EFI VM VMX Configuration
+```vmx
+.encoding = "UTF-8"
+config.version = "8"
+virtualHW.version = "21"
+displayName = "k3s-gpu-efi"
+guestOS = "ubuntu-64"
+firmware = "efi"                              # CRITICAL: Use EFI not BIOS
+numvcpus = "8"
+memSize = "16384"
+sched.mem.min = "16384"
+sched.mem.minSize = "16384"
+sched.mem.pin = "TRUE"
+pciBridge0.present = "TRUE"
+pciBridge4.present = "TRUE"
+pciBridge4.virtualDev = "pcieRootPort"
+pciBridge4.functions = "8"
+pciBridge5.present = "TRUE"
+pciBridge5.virtualDev = "pcieRootPort"
+pciBridge5.functions = "8"
+pciBridge6.present = "TRUE"
+pciBridge6.virtualDev = "pcieRootPort"
+pciBridge6.functions = "8"
+pciBridge7.present = "TRUE"
+pciBridge7.virtualDev = "pcieRootPort"
+pciBridge7.functions = "8"
+scsi0.present = "TRUE"
+scsi0.virtualDev = "lsilogic"                 # Use lsilogic for Ubuntu installer
+scsi0:0.present = "TRUE"
+scsi0:0.fileName = "k3s-gpu-efi.vmdk"
+ethernet0.present = "TRUE"
+ethernet0.virtualDev = "vmxnet3"
+ethernet0.networkName = "VM Network"
+pciPassthru.use64bitMMIO = "TRUE"
+pciPassthru.64bitMMIOSizeGB = "128"
+hypervisor.cpuid.v0 = "FALSE"
+pciPassthru0.present = "TRUE"
+pciPassthru0.id = "0:66:0.0"
+pciPassthru0.deviceId = "0x1b38"
+pciPassthru0.vendorId = "0x10de"
+```
+
+---
+
+## Next Steps (After EFI VM Created)
+
+Run these commands from the jump host (ocp-svc @ 192.168.1.238):
+
+### 1. Install NVIDIA Driver
+```bash
+# SSH to the new EFI GPU VM
+sshpass -p 'Andrea24!!' ssh dare@192.168.22.96
+
+# On the GPU VM:
+# Blacklist nouveau
+echo "blacklist nouveau" | sudo tee /etc/modprobe.d/blacklist-nouveau.conf
+echo "options nouveau modeset=0" | sudo tee -a /etc/modprobe.d/blacklist-nouveau.conf
+sudo update-initramfs -u
+
+# Install build dependencies
+sudo apt-get update
+sudo apt-get install -y build-essential linux-headers-$(uname -r) dkms
+
+# Download and install NVIDIA driver
+wget https://us.download.nvidia.com/tesla/535.230.02/NVIDIA-Linux-x86_64-535.230.02.run -O /tmp/nvidia.run
+sudo bash /tmp/nvidia.run --silent --no-questions --dkms
+
+# Verify
+nvidia-smi
+```
+
+### 2. Install K3s Agent
+```bash
+# Get token from K3s server (192.168.22.98)
+K3S_TOKEN=$(ssh dare@192.168.22.98 "sudo cat /var/lib/rancher/k3s/server/node-token")
+
+# Install K3s agent on GPU VM
+curl -sfL https://get.k3s.io | K3S_URL=https://192.168.22.98:6443 K3S_TOKEN=${K3S_TOKEN} sh -
+
+# Verify node joined
+kubectl get nodes
+```
+
+### 3. Install GPU Operator
+```bash
+# On K3s server (192.168.22.98)
+helm repo add nvidia https://helm.ngc.nvidia.com/nvidia
+helm repo update
+
+helm install gpu-operator nvidia/gpu-operator \
+  --namespace gpu-operator \
+  --create-namespace \
+  --set driver.enabled=false \
+  --set toolkit.enabled=true \
+  --set devicePlugin.enabled=true
+```
+
+### 4. Configure Time-Slicing (4 replicas)
+```bash
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: time-slicing-config
+  namespace: gpu-operator
+data:
+  tesla-p40: |-
+    version: v1
+    sharing:
+      timeSlicing:
+        resources:
+          - name: nvidia.com/gpu
+            replicas: 4
+EOF
+
+kubectl patch clusterpolicy cluster-policy \
+  -n gpu-operator \
+  --type merge \
+  -p '{"spec":{"devicePlugin":{"config":{"name":"time-slicing-config","default":"tesla-p40"}}}}'
+```
+
+---
+
 ## Alternative Solutions (If BAR Issue Persists)
 
 ### Option 1: Use vGPU Instead of Passthrough
@@ -296,3 +450,6 @@ sudo reboot
 | 2024-12-10 | Added BAR1 unassigned troubleshooting |
 | 2024-12-10 | Added NVIDIA module options workaround |
 | 2024-12-10 | Added comprehensive CLI commands |
+| 2024-12-10 | **RESOLVED**: Added EFI firmware solution |
+| 2024-12-10 | Added working EFI VM configuration |
+| 2024-12-10 | Added next steps for driver and K3s setup |
