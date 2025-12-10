@@ -69,7 +69,11 @@ k3s_cmd() {
 
 k3s_sudo() {
     local cmd="$1"
-    sshpass -p "${VM_PASSWORD}" ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR "${VM_USER}@${K3S_SERVER_IP}" "echo '${VM_PASSWORD}' | sudo -S bash -c '$cmd'" 2>&1 | grep -v "^\[sudo\] password"
+    # Use base64 encoding to safely pass password with special characters (like !!)
+    local encoded_pass
+    encoded_pass=$(echo -n "${VM_PASSWORD}" | base64)
+    # Use sed to remove the [sudo] password prompt from anywhere in the output
+    sshpass -p "${VM_PASSWORD}" ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR "${VM_USER}@${K3S_SERVER_IP}" "echo ${encoded_pass} | base64 -d | sudo -S bash -c '$cmd'" 2>&1 | sed 's/\[sudo\] password for [^:]*: //g'
 }
 
 k3s_copy() {
