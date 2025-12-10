@@ -170,10 +170,37 @@ EOF
 add_nvidia_helm_repo() {
     log_step "Adding NVIDIA Helm repository..."
 
-    # Add the repo (may already exist, which is fine)
-    k3s_sudo "helm repo add nvidia https://helm.ngc.nvidia.com/nvidia || helm repo add nvidia https://helm.ngc.nvidia.com/nvidia --force-update"
-    k3s_sudo "helm repo update nvidia"
-    log_info "NVIDIA Helm repo added"
+    # Try to add repo on K3s server first (if it has internet access)
+    if k3s_sudo "helm repo add nvidia https://helm.ngc.nvidia.com/nvidia 2>/dev/null && helm repo update nvidia 2>/dev/null"; then
+        log_info "NVIDIA Helm repo added on K3s server"
+        USE_LOCAL_CHART="false"
+    else
+        log_warn "K3s server has no internet access - will use local chart download"
+        USE_LOCAL_CHART="true"
+
+        # Download chart locally on jump host (which has internet)
+        log_info "Downloading GPU Operator chart locally..."
+        local chart_dir="/tmp/gpu-operator-chart"
+        rm -rf "$chart_dir"
+        mkdir -p "$chart_dir"
+
+        # Check if helm is available locally
+        if ! command -v helm &>/dev/null; then
+            log_info "Installing Helm locally..."
+            curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+        fi
+
+        helm repo add nvidia https://helm.ngc.nvidia.com/nvidia 2>/dev/null || true
+        helm repo update nvidia
+        helm pull nvidia/gpu-operator --version "${GPU_OPERATOR_VERSION#v}" --untar --untardir "$chart_dir"
+
+        # Copy chart to K3s server
+        log_info "Copying chart to K3s server..."
+        k3s_sudo "rm -rf /tmp/gpu-operator-chart"
+        sshpass -p "${VM_PASSWORD}" scp -o StrictHostKeyChecking=no -o LogLevel=ERROR -r "$chart_dir" "${VM_USER}@${K3S_SERVER_IP}:/tmp/"
+
+        log_info "Chart downloaded and copied to K3s server"
+    fi
 }
 
 install_gpu_operator() {
@@ -224,9 +251,16 @@ install_gpu_operator() {
     helm_args+=" --set toolkit.env[3].name=CONTAINERD_SET_AS_DEFAULT"
     helm_args+=" --set-string toolkit.env[3].value=true"
 
-    log_info "Running: helm install gpu-operator nvidia/gpu-operator ${helm_args}"
+    # Determine chart source
+    local chart_ref="nvidia/gpu-operator"
+    if [[ "${USE_LOCAL_CHART:-false}" == "true" ]]; then
+        chart_ref="/tmp/gpu-operator-chart/gpu-operator"
+        log_info "Using local chart: ${chart_ref}"
+    fi
 
-    k3s_sudo "helm upgrade --install gpu-operator nvidia/gpu-operator ${helm_args} --wait --timeout 10m" || {
+    log_info "Running: helm install gpu-operator ${chart_ref} ${helm_args}"
+
+    k3s_sudo "helm upgrade --install gpu-operator ${chart_ref} ${helm_args} --wait --timeout 10m" || {
         log_warn "Helm install had issues, checking status..."
     }
 
