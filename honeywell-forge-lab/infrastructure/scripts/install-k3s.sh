@@ -239,15 +239,18 @@ get_k3s_token() {
     local retries=10
 
     for ((i=1; i<=retries; i++)); do
-        token=$(vm_sudo_cmd "${ip}" "cat /var/lib/rancher/k3s/server/node-token 2>/dev/null" | { grep -v "^\[sudo\]" || true; } | tail -1)
+        token=$(vm_sudo_cmd "${ip}" "cat /var/lib/rancher/k3s/server/node-token 2>/dev/null" | { grep -v "^\[sudo\]" || true; } | tail -1) || true
         if [[ -n "$token" && "$token" == K* ]]; then
             echo "$token"
             return 0
         fi
+        log_info "Waiting for token (attempt $i/$retries)..."
         sleep 3
     done
 
-    return 1
+    log_error "Failed to retrieve K3s token after $retries attempts"
+    echo ""
+    return 0
 }
 
 install_k3s_agent() {
