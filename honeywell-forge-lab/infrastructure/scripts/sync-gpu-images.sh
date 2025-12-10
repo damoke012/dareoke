@@ -31,9 +31,10 @@
 set -euo pipefail
 
 # GPU Operator version
-GPU_OPERATOR_VERSION="${GPU_OPERATOR_VERSION:-v25.10.1}"
+GPU_OPERATOR_VERSION="${GPU_OPERATOR_VERSION:-v24.9.2}"
 DRIVER_VERSION="${DRIVER_VERSION:-535.230.02}"
-DRIVER_OS="${DRIVER_OS:-ubuntu22.04}"
+# NOTE: Set to ubuntu20.04 for Honeywell K3s GPU nodes (Ubuntu 20.04 LTS)
+DRIVER_OS="${DRIVER_OS:-ubuntu20.04}"
 
 # Output directory
 IMAGE_DIR="${IMAGE_DIR:-./gpu-images}"
@@ -59,37 +60,88 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_step() { echo -e "${BLUE}[STEP]${NC} $1"; }
 
-# Define all required images for GPU Operator v25
-# Note: gpu-feature-discovery requires NGC authentication
+# =============================================================================
+# Image versions mapped to GPU Operator versions
+# These must match what the GPU Operator Helm chart actually deploys!
+# To find correct versions: helm show values nvidia/gpu-operator --version 24.9.2
+# =============================================================================
+
+# GPU Operator v24.9.2 component versions
+# These versions are extracted from: helm show values nvidia/gpu-operator --version 24.9.2
+declare -A GPU_OP_V24_9_2=(
+    [operator]="v24.9.2"
+    [operator_validator]="v24.9.2"
+    [driver_manager]="v0.7.0"
+    [container_toolkit]="v1.17.4-ubuntu20.04"
+    [device_plugin]="v0.17.0"
+    [dcgm_exporter]="3.3.9-3.6.1-ubuntu22.04"
+    [gpu_feature_discovery]="v0.17.0"
+    [nfd]="v0.16.6"
+    [cuda_base]="12.6.3-base-ubi8"
+)
+
+# Select versions based on GPU_OPERATOR_VERSION
+case "${GPU_OPERATOR_VERSION}" in
+    v24.9.2|24.9.2)
+        OPERATOR_VALIDATOR_VERSION="${GPU_OP_V24_9_2[operator_validator]}"
+        DRIVER_MANAGER_VERSION="${GPU_OP_V24_9_2[driver_manager]}"
+        CONTAINER_TOOLKIT_VERSION="${GPU_OP_V24_9_2[container_toolkit]}"
+        DEVICE_PLUGIN_VERSION="${GPU_OP_V24_9_2[device_plugin]}"
+        DCGM_EXPORTER_VERSION="${GPU_OP_V24_9_2[dcgm_exporter]}"
+        GPU_FEATURE_DISCOVERY_VERSION="${GPU_OP_V24_9_2[gpu_feature_discovery]}"
+        NFD_VERSION="${GPU_OP_V24_9_2[nfd]}"
+        CUDA_BASE_VERSION="${GPU_OP_V24_9_2[cuda_base]}"
+        ;;
+    *)
+        # Default to latest known versions
+        log_warn "Unknown GPU Operator version ${GPU_OPERATOR_VERSION}, using v24.9.2 component versions"
+        OPERATOR_VALIDATOR_VERSION="v24.9.2"
+        DRIVER_MANAGER_VERSION="v0.7.0"
+        CONTAINER_TOOLKIT_VERSION="v1.17.4-ubuntu20.04"
+        DEVICE_PLUGIN_VERSION="v0.17.0"
+        DCGM_EXPORTER_VERSION="3.3.9-3.6.1-ubuntu22.04"
+        GPU_FEATURE_DISCOVERY_VERSION="v0.17.0"
+        NFD_VERSION="v0.16.6"
+        CUDA_BASE_VERSION="12.6.3-base-ubi8"
+        ;;
+esac
+
+# Define all required images for GPU Operator
 declare -a GPU_IMAGES=(
-    # GPU Operator
+    # GPU Operator controller
     "nvcr.io/nvidia/gpu-operator:${GPU_OPERATOR_VERSION}"
 
-    # Driver Manager
-    "nvcr.io/nvidia/cloud-native/k8s-driver-manager:v0.9.1"
+    # GPU Operator Validator (init container for validation pods)
+    "nvcr.io/nvidia/cloud-native/gpu-operator-validator:${OPERATOR_VALIDATOR_VERSION}"
+
+    # Driver Manager (init container for driver pods)
+    "nvcr.io/nvidia/cloud-native/k8s-driver-manager:${DRIVER_MANAGER_VERSION}"
 
     # NVIDIA Driver
     "nvcr.io/nvidia/driver:${DRIVER_VERSION}-${DRIVER_OS}"
 
     # Container Toolkit
-    "nvcr.io/nvidia/k8s/container-toolkit:v1.18.1"
+    "nvcr.io/nvidia/k8s/container-toolkit:${CONTAINER_TOOLKIT_VERSION}"
 
     # Device Plugin
-    "nvcr.io/nvidia/k8s-device-plugin:v0.18.1"
+    "nvcr.io/nvidia/k8s-device-plugin:${DEVICE_PLUGIN_VERSION}"
 
     # DCGM Exporter (monitoring)
-    "nvcr.io/nvidia/k8s/dcgm-exporter:4.4.2-4.7.0-distroless"
+    "nvcr.io/nvidia/k8s/dcgm-exporter:${DCGM_EXPORTER_VERSION}"
+
+    # GPU Feature Discovery
+    "nvcr.io/nvidia/k8s/gpu-feature-discovery:${GPU_FEATURE_DISCOVERY_VERSION}"
 
     # Node Feature Discovery (from k8s.io - no auth required)
-    "registry.k8s.io/nfd/node-feature-discovery:v0.16.4"
+    "registry.k8s.io/nfd/node-feature-discovery:${NFD_VERSION}"
 
     # CUDA base image (for testing)
-    "nvcr.io/nvidia/cuda:12.2.0-base-ubuntu22.04"
+    "nvcr.io/nvidia/cuda:${CUDA_BASE_VERSION}"
 )
 
-# Optional images that require NGC authentication
+# Optional images that may require NGC authentication (not included by default)
 declare -a NGC_AUTH_IMAGES=(
-    "nvcr.io/nvidia/k8s/gpu-feature-discovery:v0.18.1"
+    # Add any images requiring NGC auth here
 )
 
 # Driver images for different OS versions
@@ -100,10 +152,20 @@ declare -A DRIVER_IMAGES=(
 )
 
 list_images() {
-    log_step "Required GPU Operator Images:"
+    log_step "GPU Operator ${GPU_OPERATOR_VERSION} - Required Images:"
     echo ""
+    echo "  Component Versions:"
+    echo "    Driver Manager:        ${DRIVER_MANAGER_VERSION}"
+    echo "    Container Toolkit:     ${CONTAINER_TOOLKIT_VERSION}"
+    echo "    Device Plugin:         ${DEVICE_PLUGIN_VERSION}"
+    echo "    DCGM Exporter:         ${DCGM_EXPORTER_VERSION}"
+    echo "    GPU Feature Discovery: ${GPU_FEATURE_DISCOVERY_VERSION}"
+    echo "    Node Feature Discovery: ${NFD_VERSION}"
+    echo "    NVIDIA Driver:         ${DRIVER_VERSION}-${DRIVER_OS}"
+    echo ""
+    echo "  Images to sync:"
     for img in "${GPU_IMAGES[@]}"; do
-        echo "  $img"
+        echo "    $img"
     done
     echo ""
     log_info "Total: ${#GPU_IMAGES[@]} images"

@@ -28,9 +28,12 @@
 # =============================================================================
 
 variables:
-  GPU_OPERATOR_VERSION: "v25.10.1"
+  GPU_OPERATOR_VERSION: "v24.9.2"
   DRIVER_VERSION: "535.230.02"
-  DRIVER_OS: "ubuntu22.04"
+  # NOTE: Set to ubuntu20.04 for Honeywell K3s GPU nodes (Ubuntu 20.04 LTS)
+  DRIVER_OS: "ubuntu20.04"
+  # Airgapped mode - disable apt repo setup in driver container
+  AIRGAPPED: "true"
   GPU_TIME_SLICES: "4"
   K3S_VERSION: "v1.28.4+k3s1"
   VM_USER: "dare"
@@ -45,13 +48,13 @@ stages:
 # =============================================================================
 # Stage: Sync Images to Private Registry (for airgapped environments)
 # =============================================================================
-sync-images:
+sync-images-registry:
   stage: sync
   image: docker:24-dind
   services:
     - docker:24-dind
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "web" && $ACTION == "sync-images"'
+    - if: '$CI_PIPELINE_SOURCE == "web" && $ACTION == "sync-images-registry"'
     - if: '$CI_COMMIT_BRANCH == "main" && $REGISTRY_URL'
       changes:
         - infrastructure/scripts/sync-gpu-images.sh
@@ -72,6 +75,70 @@ sync-images:
       export DRIVER_OS="${DRIVER_OS}"
       export CI=true
       ./infrastructure/scripts/sync-gpu-images.sh --push
+
+# =============================================================================
+# Stage: Save Images as Tar (fully airgapped - no registry needed)
+# =============================================================================
+sync-images-tar:
+  stage: sync
+  image: docker:24-dind
+  services:
+    - docker:24-dind
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web" && $ACTION == "sync-images-tar"'
+    - if: '$CI_PIPELINE_SOURCE == "web" && $ACTION == "full-deploy"'
+  artifacts:
+    paths:
+      - gpu-images/
+    expire_in: 7 days
+  script:
+    - apk add --no-cache bash curl
+    - chmod +x infrastructure/scripts/sync-gpu-images.sh
+    - |
+      export GPU_OPERATOR_VERSION="${GPU_OPERATOR_VERSION}"
+      export DRIVER_VERSION="${DRIVER_VERSION}"
+      export DRIVER_OS="${DRIVER_OS}"
+      ./infrastructure/scripts/sync-gpu-images.sh --save
+    - ls -lh gpu-images/
+
+# =============================================================================
+# Stage: Load Images to K3s Nodes via SSH (airgapped deployment)
+# =============================================================================
+load-images:
+  stage: sync
+  image: alpine:latest
+  needs:
+    - job: sync-images-tar
+      artifacts: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web" && $ACTION == "sync-images-tar"'
+    - if: '$CI_PIPELINE_SOURCE == "web" && $ACTION == "full-deploy"'
+  before_script:
+    - apk add --no-cache bash openssh-client sshpass
+  script:
+    - |
+      TAR_FILE="gpu-images/gpu-operator-images-${GPU_OPERATOR_VERSION}.tar"
+      ENCODED_PASS=$(echo -n "${VM_PASSWORD}" | base64)
+
+      # Load to K3s Server
+      echo "=== Loading images to K3s server ${K3S_SERVER_IP} ==="
+      sshpass -p "${VM_PASSWORD}" scp -o StrictHostKeyChecking=no \
+        "${TAR_FILE}" "${VM_USER}@${K3S_SERVER_IP}:/tmp/"
+      sshpass -p "${VM_PASSWORD}" ssh -o StrictHostKeyChecking=no \
+        "${VM_USER}@${K3S_SERVER_IP}" \
+        "echo ${ENCODED_PASS} | base64 -d | sudo -S k3s ctr images import /tmp/gpu-operator-images-${GPU_OPERATOR_VERSION}.tar"
+
+      # Load to K3s GPU Agent (if specified)
+      if [ -n "${K3S_AGENT_IP}" ]; then
+        echo "=== Loading images to K3s GPU agent ${K3S_AGENT_IP} ==="
+        sshpass -p "${VM_PASSWORD}" scp -o StrictHostKeyChecking=no \
+          "${TAR_FILE}" "${VM_USER}@${K3S_AGENT_IP}:/tmp/"
+        sshpass -p "${VM_PASSWORD}" ssh -o StrictHostKeyChecking=no \
+          "${VM_USER}@${K3S_AGENT_IP}" \
+          "echo ${ENCODED_PASS} | base64 -d | sudo -S k3s ctr images import /tmp/gpu-operator-images-${GPU_OPERATOR_VERSION}.tar"
+      fi
+
+      echo "=== Images loaded successfully ==="
 
 # =============================================================================
 # Stage: Setup GPU Node Prerequisites

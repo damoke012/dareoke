@@ -1,7 +1,9 @@
 # GPU Operator Deployment Pipeline
 #
 # This workflow deploys NVIDIA GPU Operator to a K3s cluster.
-# It can sync images to a private registry and install via Helm.
+# Supports two airgapped modes:
+#   1. Registry mode: Push images to private registry (Harbor, etc.)
+#   2. Tar mode: Save images as tar files and import directly via SSH
 #
 # Trigger: Manual dispatch or on push to infrastructure/scripts/
 #
@@ -16,15 +18,25 @@ on:
         default: 'deploy'
         type: choice
         options:
-          - sync-images
-          - deploy
+          - sync-images-registry    # Push to private registry
+          - sync-images-tar         # Save as tar and deploy via SSH
+          - deploy                  # Deploy GPU Operator (requires images)
+          - full-deploy             # Save tar + load images + deploy
           - uninstall
       k3s_server_ip:
         description: 'K3s Server IP'
         required: true
         type: string
+      k3s_agent_ip:
+        description: 'K3s GPU Agent IP (if separate from server)'
+        required: false
+        type: string
+      jump_host_ip:
+        description: 'Jump host IP (ocp-svc) with internet access'
+        required: false
+        type: string
       registry_url:
-        description: 'Private registry URL (e.g., harbor.example.com/nvidia)'
+        description: 'Private registry URL (for sync-images-registry)'
         required: false
         type: string
       gpu_time_slices:
@@ -42,15 +54,21 @@ on:
           - 'true'
 
 env:
-  GPU_OPERATOR_VERSION: v25.10.1
+  GPU_OPERATOR_VERSION: v24.9.2
   DRIVER_VERSION: 535.230.02
-  DRIVER_OS: ubuntu22.04
+  # NOTE: Set to ubuntu20.04 for Honeywell K3s GPU nodes (Ubuntu 20.04 LTS)
+  DRIVER_OS: ubuntu20.04
+  # Airgapped mode - disable apt repo setup in driver container
+  AIRGAPPED: "true"
 
 jobs:
-  sync-images:
+  # =============================================================================
+  # Option 1: Sync to Private Registry (requires registry access from K3s nodes)
+  # =============================================================================
+  sync-images-registry:
     name: Sync GPU Images to Registry
     runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.action == 'sync-images' && github.event.inputs.registry_url != '' }}
+    if: ${{ github.event.inputs.action == 'sync-images-registry' && github.event.inputs.registry_url != '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -66,15 +84,117 @@ jobs:
           REGISTRY_URL: ${{ github.event.inputs.registry_url }}
           REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
           REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          GPU_OPERATOR_VERSION: ${{ env.GPU_OPERATOR_VERSION }}
           CI: 'true'
         run: |
           chmod +x infrastructure/scripts/sync-gpu-images.sh
           ./infrastructure/scripts/sync-gpu-images.sh --push
 
+  # =============================================================================
+  # Option 2: Save as Tar and Deploy via SSH (fully airgapped - no registry)
+  # =============================================================================
+  sync-images-tar:
+    name: Save GPU Images as Tar
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.action == 'sync-images-tar' || github.event.inputs.action == 'full-deploy' }}
+    outputs:
+      tar_file: ${{ steps.save.outputs.tar_file }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Save Images to Tar
+        id: save
+        env:
+          GPU_OPERATOR_VERSION: ${{ env.GPU_OPERATOR_VERSION }}
+          DRIVER_VERSION: ${{ env.DRIVER_VERSION }}
+          DRIVER_OS: ${{ env.DRIVER_OS }}
+        run: |
+          chmod +x infrastructure/scripts/sync-gpu-images.sh
+          ./infrastructure/scripts/sync-gpu-images.sh --save
+          echo "tar_file=gpu-images/gpu-operator-images-${GPU_OPERATOR_VERSION}.tar" >> $GITHUB_OUTPUT
+          ls -lh gpu-images/
+
+      - name: Upload Tar as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-operator-images
+          path: gpu-images/
+          retention-days: 7
+
+  # =============================================================================
+  # Load Images to K3s Nodes via SSH (airgapped deployment)
+  # =============================================================================
+  load-images:
+    name: Load Images to K3s Nodes
+    runs-on: ubuntu-latest
+    needs: sync-images-tar
+    if: ${{ github.event.inputs.action == 'sync-images-tar' || github.event.inputs.action == 'full-deploy' }}
+    steps:
+      - name: Download Tar Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: gpu-operator-images
+          path: gpu-images/
+
+      - name: Install sshpass
+        run: sudo apt-get update && sudo apt-get install -y sshpass
+
+      - name: Load Images to K3s Server
+        env:
+          K3S_SERVER_IP: ${{ github.event.inputs.k3s_server_ip }}
+          VM_USER: ${{ secrets.VM_USER }}
+          VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
+          GPU_OPERATOR_VERSION: ${{ env.GPU_OPERATOR_VERSION }}
+        run: |
+          TAR_FILE="gpu-images/gpu-operator-images-${GPU_OPERATOR_VERSION}.tar"
+          echo "Copying ${TAR_FILE} to K3s server ${K3S_SERVER_IP}..."
+          sshpass -p "${VM_PASSWORD}" scp -o StrictHostKeyChecking=no \
+            "${TAR_FILE}" "${VM_USER}@${K3S_SERVER_IP}:/tmp/"
+
+          echo "Importing images on K3s server..."
+          ENCODED_PASS=$(echo -n "${VM_PASSWORD}" | base64)
+          sshpass -p "${VM_PASSWORD}" ssh -o StrictHostKeyChecking=no \
+            "${VM_USER}@${K3S_SERVER_IP}" \
+            "echo ${ENCODED_PASS} | base64 -d | sudo -S k3s ctr images import /tmp/gpu-operator-images-${GPU_OPERATOR_VERSION}.tar"
+
+          echo "Verifying images on server..."
+          sshpass -p "${VM_PASSWORD}" ssh -o StrictHostKeyChecking=no \
+            "${VM_USER}@${K3S_SERVER_IP}" \
+            "echo ${ENCODED_PASS} | base64 -d | sudo -S k3s ctr images ls | grep -E 'nvidia|nfd' | head -10"
+
+      - name: Load Images to K3s GPU Agent
+        if: ${{ github.event.inputs.k3s_agent_ip != '' }}
+        env:
+          K3S_AGENT_IP: ${{ github.event.inputs.k3s_agent_ip }}
+          VM_USER: ${{ secrets.VM_USER }}
+          VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
+          GPU_OPERATOR_VERSION: ${{ env.GPU_OPERATOR_VERSION }}
+        run: |
+          TAR_FILE="gpu-images/gpu-operator-images-${GPU_OPERATOR_VERSION}.tar"
+          echo "Copying ${TAR_FILE} to K3s GPU agent ${K3S_AGENT_IP}..."
+          sshpass -p "${VM_PASSWORD}" scp -o StrictHostKeyChecking=no \
+            "${TAR_FILE}" "${VM_USER}@${K3S_AGENT_IP}:/tmp/"
+
+          echo "Importing images on K3s GPU agent..."
+          ENCODED_PASS=$(echo -n "${VM_PASSWORD}" | base64)
+          sshpass -p "${VM_PASSWORD}" ssh -o StrictHostKeyChecking=no \
+            "${VM_USER}@${K3S_AGENT_IP}" \
+            "echo ${ENCODED_PASS} | base64 -d | sudo -S k3s ctr images import /tmp/gpu-operator-images-${GPU_OPERATOR_VERSION}.tar"
+
+          echo "Verifying images on GPU agent..."
+          sshpass -p "${VM_PASSWORD}" ssh -o StrictHostKeyChecking=no \
+            "${VM_USER}@${K3S_AGENT_IP}" \
+            "echo ${ENCODED_PASS} | base64 -d | sudo -S k3s ctr images ls | grep -E 'nvidia|nfd' | head -10"
+
+  # =============================================================================
+  # Deploy GPU Operator
+  # =============================================================================
   deploy:
     name: Deploy GPU Operator
     runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.action == 'deploy' }}
+    needs: [load-images]
+    if: ${{ always() && (github.event.inputs.action == 'deploy' || github.event.inputs.action == 'full-deploy') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -85,7 +205,7 @@ jobs:
       - name: Deploy GPU Operator
         env:
           K3S_SERVER_IP: ${{ github.event.inputs.k3s_server_ip }}
-          VM_USER: ${{ secrets.VM_USER || 'dare' }}
+          VM_USER: ${{ secrets.VM_USER }}
           VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
           GPU_TIME_SLICES: ${{ github.event.inputs.gpu_time_slices }}
           SKIP_DRIVER: ${{ github.event.inputs.skip_driver }}
@@ -93,6 +213,7 @@ jobs:
           GPU_OPERATOR_VERSION: ${{ env.GPU_OPERATOR_VERSION }}
           DRIVER_VERSION: ${{ env.DRIVER_VERSION }}
           DRIVER_OS: ${{ env.DRIVER_OS }}
+          AIRGAPPED: ${{ env.AIRGAPPED }}
         run: |
           chmod +x infrastructure/scripts/install-gpu-operator.sh
           ./infrastructure/scripts/install-gpu-operator.sh
@@ -100,14 +221,24 @@ jobs:
       - name: Verify Deployment
         env:
           K3S_SERVER_IP: ${{ github.event.inputs.k3s_server_ip }}
-          VM_USER: ${{ secrets.VM_USER || 'dare' }}
+          VM_USER: ${{ secrets.VM_USER }}
           VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
         run: |
+          ENCODED_PASS=$(echo -n "${VM_PASSWORD}" | base64)
+          echo "=== GPU Operator Pods ==="
           sshpass -p "${VM_PASSWORD}" ssh -o StrictHostKeyChecking=no \
             "${VM_USER}@${K3S_SERVER_IP}" \
-            "sudo kubectl get pods -n gpu-operator && \
-             sudo kubectl get nodes -o custom-columns='NAME:.metadata.name,GPU:.status.allocatable.nvidia\.com/gpu'"
+            "echo ${ENCODED_PASS} | base64 -d | sudo -S kubectl get pods -n gpu-operator"
 
+          echo ""
+          echo "=== GPU Resources ==="
+          sshpass -p "${VM_PASSWORD}" ssh -o StrictHostKeyChecking=no \
+            "${VM_USER}@${K3S_SERVER_IP}" \
+            "echo ${ENCODED_PASS} | base64 -d | sudo -S kubectl get nodes -o custom-columns='NAME:.metadata.name,GPU:.status.allocatable.nvidia\.com/gpu'"
+
+  # =============================================================================
+  # Uninstall
+  # =============================================================================
   uninstall:
     name: Uninstall GPU Operator
     runs-on: ubuntu-latest
@@ -122,7 +253,7 @@ jobs:
       - name: Uninstall GPU Operator
         env:
           K3S_SERVER_IP: ${{ github.event.inputs.k3s_server_ip }}
-          VM_USER: ${{ secrets.VM_USER || 'dare' }}
+          VM_USER: ${{ secrets.VM_USER }}
           VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
         run: |
           chmod +x infrastructure/scripts/install-gpu-operator.sh

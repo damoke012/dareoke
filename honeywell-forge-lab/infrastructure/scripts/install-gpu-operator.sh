@@ -40,14 +40,18 @@ VM_USER="${VM_USER:-dare}"
 VM_PASSWORD="${VM_PASSWORD:-}"
 GPU_TIME_SLICES="${GPU_TIME_SLICES:-4}"
 SKIP_DRIVER="${SKIP_DRIVER:-false}"
-GPU_OPERATOR_VERSION="${GPU_OPERATOR_VERSION:-v25.10.1}"
+GPU_OPERATOR_VERSION="${GPU_OPERATOR_VERSION:-v24.9.2}"
 DRIVER_VERSION="${DRIVER_VERSION:-535.230.02}"
-DRIVER_OS="${DRIVER_OS:-ubuntu22.04}"
+# NOTE: Set to ubuntu20.04 for Honeywell K3s GPU nodes (Ubuntu 20.04 LTS)
+DRIVER_OS="${DRIVER_OS:-ubuntu20.04}"
 HELM_VERSION="${HELM_VERSION:-v3.13.2}"
 
 # Registry settings for airgapped deployment
 REGISTRY_URL="${REGISTRY_URL:-}"  # e.g., harbor.apps.lab.ocp.lan/nvidia
 USE_PREINSTALLED_DRIVER="${USE_PREINSTALLED_DRIVER:-false}"
+
+# Airgapped mode - disable apt repo setup in driver container
+AIRGAPPED="${AIRGAPPED:-true}"
 
 # Colors
 RED='\033[0;31m'
@@ -223,10 +227,18 @@ install_gpu_operator() {
         helm_args+=" --set driver.enabled=false"
     else
         # GPU Operator will install driver via container
-        log_info "GPU Operator will install driver: ${DRIVER_VERSION}-${DRIVER_OS}"
+        # NOTE: Only set version number without OS suffix - operator appends OS automatically
+        log_info "GPU Operator will install driver: ${DRIVER_VERSION} (OS auto-detected)"
         helm_args+=" --set driver.enabled=true"
         helm_args+=" --set driver.repository=${registry}"
-        helm_args+=" --set driver.version=${DRIVER_VERSION}-${DRIVER_OS}"
+        helm_args+=" --set driver.version=${DRIVER_VERSION}"
+
+        # Airgapped mode - skip apt repo setup (kernel headers must be pre-installed)
+        if [[ "${AIRGAPPED}" == "true" ]]; then
+            log_info "Airgapped mode: Disabling driver apt repo setup"
+            helm_args+=" --set driver.env[0].name=DISABLE_REPO_SETUP"
+            helm_args+=" --set-string driver.env[0].value=true"
+        fi
     fi
 
     # Configure all component repositories for airgapped
@@ -456,19 +468,22 @@ Environment Variables:
   VM_USER              SSH user (default: dare)
   GPU_TIME_SLICES      Number of time slices (default: 4)
   SKIP_DRIVER          Skip driver install (default: false)
-  GPU_OPERATOR_VERSION Version to install (default: v25.10.1)
+  GPU_OPERATOR_VERSION Version to install (default: v24.9.2)
   DRIVER_VERSION       NVIDIA driver version (default: 535.230.02)
-  DRIVER_OS            Driver OS tag (default: ubuntu22.04)
+  DRIVER_OS            Driver OS tag (default: ubuntu20.04)
   REGISTRY_URL         Private registry URL for airgapped (e.g., harbor.apps.lab.ocp.lan/nvidia)
+  AIRGAPPED            Disable apt repo setup in driver container (default: true)
 
 Examples:
   # Basic installation (online)
+  K3S_SERVER_IP=192.168.22.91 VM_PASSWORD=secret AIRGAPPED=false ./install-gpu-operator.sh
+
+  # Airgapped installation (default - no apt updates, kernel headers pre-installed)
   K3S_SERVER_IP=192.168.22.91 VM_PASSWORD=secret ./install-gpu-operator.sh
 
-  # Airgapped installation using Harbor
+  # Airgapped installation using Harbor private registry
   K3S_SERVER_IP=192.168.22.91 VM_PASSWORD=secret \\
     REGISTRY_URL=harbor.apps.lab.ocp.lan/nvidia \\
-    DRIVER_VERSION=535.230.02 DRIVER_OS=ubuntu22.04 \\
     ./install-gpu-operator.sh
 
   # With 4 GPU time slices
