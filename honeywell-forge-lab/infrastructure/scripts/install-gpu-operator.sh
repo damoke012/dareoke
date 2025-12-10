@@ -170,8 +170,9 @@ EOF
 add_nvidia_helm_repo() {
     log_step "Adding NVIDIA Helm repository..."
 
-    k3s_sudo "helm repo add nvidia https://helm.ngc.nvidia.com/nvidia 2>/dev/null || true"
-    k3s_sudo "helm repo update"
+    # Add the repo (may already exist, which is fine)
+    k3s_sudo "helm repo add nvidia https://helm.ngc.nvidia.com/nvidia || helm repo add nvidia https://helm.ngc.nvidia.com/nvidia --force-update"
+    k3s_sudo "helm repo update nvidia"
     log_info "NVIDIA Helm repo added"
 }
 
