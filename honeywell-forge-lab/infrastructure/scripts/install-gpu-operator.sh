@@ -260,7 +260,8 @@ install_gpu_operator() {
 
     log_info "Running: helm install gpu-operator ${chart_ref} ${helm_args}"
 
-    k3s_sudo "helm upgrade --install gpu-operator ${chart_ref} ${helm_args} --wait --timeout 10m" || {
+    # Need to set KUBECONFIG for helm to find the K3s cluster
+    k3s_sudo "KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm upgrade --install gpu-operator ${chart_ref} ${helm_args} --wait --timeout 10m" || {
         log_warn "Helm install had issues, checking status..."
     }
 
@@ -272,12 +273,17 @@ wait_for_gpu_operator() {
 
     local retries=60
     for ((i=1; i<=retries; i++)); do
-        local ready=$(k3s_sudo "kubectl get pods -n gpu-operator --no-headers 2>/dev/null | grep -c 'Running' || echo 0")
-        local total=$(k3s_sudo "kubectl get pods -n gpu-operator --no-headers 2>/dev/null | wc -l || echo 0")
+        # Get counts and trim whitespace/newlines
+        local ready=$(k3s_sudo "kubectl get pods -n gpu-operator --no-headers 2>/dev/null | grep -c 'Running' || echo 0" | tr -d '[:space:]')
+        local total=$(k3s_sudo "kubectl get pods -n gpu-operator --no-headers 2>/dev/null | wc -l" | tr -d '[:space:]')
+
+        # Default to 0 if empty
+        ready=${ready:-0}
+        total=${total:-0}
 
         log_info "GPU Operator pods: ${ready}/${total} Running (attempt ${i}/${retries})"
 
-        if [[ "$ready" -ge 5 && "$ready" == "$total" ]]; then
+        if [[ "$ready" -ge 5 ]] && [[ "$ready" == "$total" ]]; then
             log_info "All GPU Operator pods are running!"
             return 0
         fi
