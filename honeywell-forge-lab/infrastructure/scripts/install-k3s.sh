@@ -240,10 +240,11 @@ get_k3s_token() {
         local raw_output
         raw_output=$(vm_sudo_cmd "${ip}" "cat /var/lib/rancher/k3s/server/node-token") || true
 
-        # Extract just the token line (starts with K10)
-        token=$(echo "$raw_output" | grep "^K10" | head -1) || true
+        # Extract token - it contains K10 followed by hex chars, ::server:, and more hex
+        # Use grep -o to extract just the token pattern from anywhere in the output
+        token=$(echo "$raw_output" | grep -oE 'K10[a-f0-9]+::[a-z]+:[a-f0-9]+' | head -1) || true
 
-        if [[ -n "$token" && "$token" == K* ]]; then
+        if [[ -n "$token" && "$token" == K10* ]]; then
             echo "$token"
             return 0
         fi
