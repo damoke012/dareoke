@@ -1,0 +1,250 @@
+# =============================================================================
+# K3s GPU Cluster Deployment Pipeline
+# =============================================================================
+#
+# Complete CI/CD pipeline for deploying K3s with GPU Operator.
+# Handles all dependencies automatically:
+#   1. GPU node prerequisites
+#   2. K3s cluster installation
+#   3. Image sync to private registry (airgapped)
+#   4. GPU Operator deployment with time-slicing
+#
+# Required Variables (set in GitLab CI/CD Settings > Variables):
+#   K3S_SERVER_IP     - K3s server IP address
+#   K3S_AGENT_IP      - K3s GPU agent IP address (optional)
+#   VM_PASSWORD       - SSH password for VMs
+#
+# Optional Variables:
+#   VM_USER           - SSH username (default: dare)
+#   REGISTRY_URL      - Private registry URL (for airgapped)
+#   REGISTRY_USER     - Registry username
+#   REGISTRY_PASSWORD - Registry password
+#   GPU_TIME_SLICES   - Number of GPU slices (default: 4)
+#
+# Pipeline Triggers:
+#   - Manual trigger from GitLab UI (select ACTION)
+#   - Push to main branch (manual approval required)
+#
+# =============================================================================
+
+variables:
+  GPU_OPERATOR_VERSION: "v25.10.1"
+  DRIVER_VERSION: "535.230.02"
+  DRIVER_OS: "ubuntu22.04"
+  GPU_TIME_SLICES: "4"
+  K3S_VERSION: "v1.28.4+k3s1"
+  VM_USER: "dare"
+
+stages:
+  - sync
+  - setup
+  - deploy
+  - verify
+  - cleanup
+
+# =============================================================================
+# Stage: Sync Images to Private Registry (for airgapped environments)
+# =============================================================================
+sync-images:
+  stage: sync
+  image: docker:24-dind
+  services:
+    - docker:24-dind
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web" && $ACTION == "sync-images"'
+    - if: '$CI_COMMIT_BRANCH == "main" && $REGISTRY_URL'
+      changes:
+        - infrastructure/scripts/sync-gpu-images.sh
+      when: manual
+  script:
+    - apk add --no-cache bash curl
+    - |
+      if [ -n "$REGISTRY_USER" ] && [ -n "$REGISTRY_PASSWORD" ]; then
+        echo "$REGISTRY_PASSWORD" | docker login "${REGISTRY_URL%%/*}" -u "$REGISTRY_USER" --password-stdin
+      fi
+    - chmod +x infrastructure/scripts/sync-gpu-images.sh
+    - |
+      export REGISTRY_URL="${REGISTRY_URL}"
+      export REGISTRY_USER="${REGISTRY_USER}"
+      export REGISTRY_PASSWORD="${REGISTRY_PASSWORD}"
+      export GPU_OPERATOR_VERSION="${GPU_OPERATOR_VERSION}"
+      export DRIVER_VERSION="${DRIVER_VERSION}"
+      export DRIVER_OS="${DRIVER_OS}"
+      export CI=true
+      ./infrastructure/scripts/sync-gpu-images.sh --push
+
+# =============================================================================
+# Stage: Setup GPU Node Prerequisites
+# =============================================================================
+setup-gpu-node:
+  stage: setup
+  image: alpine:latest
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web" && $ACTION == "full-deploy"'
+    - if: '$CI_PIPELINE_SOURCE == "web" && $ACTION == "setup-gpu"'
+  before_script:
+    - apk add --no-cache bash openssh-client sshpass
+  script:
+    - chmod +x infrastructure/scripts/setup-gpu-node.sh
+    - |
+      export K3S_AGENT_IP="${K3S_AGENT_IP}"
+      export VM_USER="${VM_USER}"
+      export VM_PASSWORD="${VM_PASSWORD}"
+      export REGISTRY_URL="${REGISTRY_URL:-}"
+      ./infrastructure/scripts/setup-gpu-node.sh --remote
+  allow_failure: true  # Continue even if GPU not yet visible
+
+# =============================================================================
+# Stage: Deploy K3s + GPU Operator
+# =============================================================================
+deploy-full:
+  stage: deploy
+  image: alpine:latest
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web" && $ACTION == "full-deploy"'
+  needs:
+    - job: setup-gpu-node
+      optional: true
+  before_script:
+    - apk add --no-cache bash openssh-client sshpass curl
+  script:
+    - chmod +x infrastructure/scripts/deploy-gpu-cluster.sh
+    - chmod +x infrastructure/scripts/install-k3s.sh
+    - chmod +x infrastructure/scripts/install-gpu-operator.sh
+    - |
+      export K3S_SERVER_IP="${K3S_SERVER_IP}"
+      export K3S_AGENT_IP="${K3S_AGENT_IP:-}"
+      export VM_USER="${VM_USER}"
+      export VM_PASSWORD="${VM_PASSWORD}"
+      export K3S_VERSION="${K3S_VERSION}"
+      export GPU_OPERATOR_VERSION="${GPU_OPERATOR_VERSION}"
+      export DRIVER_VERSION="${DRIVER_VERSION}"
+      export DRIVER_OS="${DRIVER_OS}"
+      export GPU_TIME_SLICES="${GPU_TIME_SLICES}"
+      export REGISTRY_URL="${REGISTRY_URL:-}"
+      export SKIP_GPU_SETUP=true  # Already done in previous stage
+      export SKIP_REBOOT=true     # CI doesn't wait for reboot
+      ./infrastructure/scripts/deploy-gpu-cluster.sh
+
+deploy-k3s-only:
+  stage: deploy
+  image: alpine:latest
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web" && $ACTION == "deploy-k3s"'
+  before_script:
+    - apk add --no-cache bash openssh-client sshpass curl
+  script:
+    - chmod +x infrastructure/scripts/install-k3s.sh
+    - |
+      export K3S_SERVER_IP="${K3S_SERVER_IP}"
+      export K3S_AGENT_IP="${K3S_AGENT_IP:-}"
+      export VM_USER="${VM_USER}"
+      export VM_PASSWORD="${VM_PASSWORD}"
+      export K3S_VERSION="${K3S_VERSION}"
+      ./infrastructure/scripts/install-k3s.sh
+
+deploy-gpu-operator:
+  stage: deploy
+  image: alpine:latest
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web" && $ACTION == "deploy-gpu-operator"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes:
+        - infrastructure/scripts/install-gpu-operator.sh
+      when: manual
+  before_script:
+    - apk add --no-cache bash openssh-client sshpass curl
+  script:
+    - chmod +x infrastructure/scripts/install-gpu-operator.sh
+    - |
+      export K3S_SERVER_IP="${K3S_SERVER_IP}"
+      export VM_USER="${VM_USER}"
+      export VM_PASSWORD="${VM_PASSWORD}"
+      export GPU_OPERATOR_VERSION="${GPU_OPERATOR_VERSION}"
+      export DRIVER_VERSION="${DRIVER_VERSION}"
+      export DRIVER_OS="${DRIVER_OS}"
+      export GPU_TIME_SLICES="${GPU_TIME_SLICES}"
+      export REGISTRY_URL="${REGISTRY_URL:-}"
+      ./infrastructure/scripts/install-gpu-operator.sh
+
+# =============================================================================
+# Stage: Verify Deployment
+# =============================================================================
+verify-cluster:
+  stage: verify
+  image: alpine:latest
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web" && $ACTION == "verify"'
+    - if: '$CI_PIPELINE_SOURCE == "web" && $ACTION == "full-deploy"'
+  needs:
+    - job: deploy-full
+      optional: true
+    - job: deploy-gpu-operator
+      optional: true
+  before_script:
+    - apk add --no-cache openssh-client sshpass
+  script:
+    - |
+      echo "=== K3s Nodes ==="
+      sshpass -p "${VM_PASSWORD}" ssh -o StrictHostKeyChecking=no \
+        "${VM_USER}@${K3S_SERVER_IP}" "sudo kubectl get nodes -o wide"
+
+      echo ""
+      echo "=== GPU Operator Pods ==="
+      sshpass -p "${VM_PASSWORD}" ssh -o StrictHostKeyChecking=no \
+        "${VM_USER}@${K3S_SERVER_IP}" "sudo kubectl get pods -n gpu-operator"
+
+      echo ""
+      echo "=== GPU Resources ==="
+      sshpass -p "${VM_PASSWORD}" ssh -o StrictHostKeyChecking=no \
+        "${VM_USER}@${K3S_SERVER_IP}" \
+        "sudo kubectl get nodes -o custom-columns='NAME:.metadata.name,GPU:.status.allocatable.nvidia\.com/gpu'"
+
+test-gpu:
+  stage: verify
+  image: alpine:latest
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web" && $ACTION == "test-gpu"'
+  before_script:
+    - apk add --no-cache openssh-client sshpass
+  script:
+    - |
+      sshpass -p "${VM_PASSWORD}" ssh -o StrictHostKeyChecking=no \
+        "${VM_USER}@${K3S_SERVER_IP}" \
+        "sudo kubectl run gpu-test-\${CI_JOB_ID} --rm -i --restart=Never \
+          --image=nvidia/cuda:12.2.0-base-ubuntu22.04 \
+          --limits=nvidia.com/gpu=1 -- nvidia-smi"
+
+# =============================================================================
+# Stage: Cleanup
+# =============================================================================
+uninstall-gpu-operator:
+  stage: cleanup
+  image: alpine:latest
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web" && $ACTION == "uninstall-gpu-operator"'
+  before_script:
+    - apk add --no-cache bash openssh-client sshpass
+  script:
+    - chmod +x infrastructure/scripts/install-gpu-operator.sh
+    - |
+      export K3S_SERVER_IP="${K3S_SERVER_IP}"
+      export VM_USER="${VM_USER}"
+      export VM_PASSWORD="${VM_PASSWORD}"
+      ./infrastructure/scripts/install-gpu-operator.sh --uninstall
+
+uninstall-k3s:
+  stage: cleanup
+  image: alpine:latest
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web" && $ACTION == "uninstall-k3s"'
+  before_script:
+    - apk add --no-cache bash openssh-client sshpass
+  script:
+    - chmod +x infrastructure/scripts/install-k3s.sh
+    - |
+      export K3S_SERVER_IP="${K3S_SERVER_IP}"
+      export K3S_AGENT_IP="${K3S_AGENT_IP:-}"
+      export VM_USER="${VM_USER}"
+      export VM_PASSWORD="${VM_PASSWORD}"
+      ./infrastructure/scripts/install-k3s.sh --uninstall

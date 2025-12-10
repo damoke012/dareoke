@@ -1,0 +1,129 @@
+# GPU Operator Deployment Pipeline
+#
+# This workflow deploys NVIDIA GPU Operator to a K3s cluster.
+# It can sync images to a private registry and install via Helm.
+#
+# Trigger: Manual dispatch or on push to infrastructure/scripts/
+#
+name: GPU Operator Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'deploy'
+        type: choice
+        options:
+          - sync-images
+          - deploy
+          - uninstall
+      k3s_server_ip:
+        description: 'K3s Server IP'
+        required: true
+        type: string
+      registry_url:
+        description: 'Private registry URL (e.g., harbor.example.com/nvidia)'
+        required: false
+        type: string
+      gpu_time_slices:
+        description: 'GPU time slices (default: 4)'
+        required: false
+        default: '4'
+        type: string
+      skip_driver:
+        description: 'Skip driver installation (use pre-installed)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+env:
+  GPU_OPERATOR_VERSION: v25.10.1
+  DRIVER_VERSION: 535.230.02
+  DRIVER_OS: ubuntu22.04
+
+jobs:
+  sync-images:
+    name: Sync GPU Images to Registry
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.action == 'sync-images' && github.event.inputs.registry_url != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to Registry
+        run: |
+          echo "${{ secrets.REGISTRY_PASSWORD }}" | \
+            docker login ${{ github.event.inputs.registry_url }} \
+              -u ${{ secrets.REGISTRY_USER }} --password-stdin
+
+      - name: Sync Images
+        env:
+          REGISTRY_URL: ${{ github.event.inputs.registry_url }}
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          CI: 'true'
+        run: |
+          chmod +x infrastructure/scripts/sync-gpu-images.sh
+          ./infrastructure/scripts/sync-gpu-images.sh --push
+
+  deploy:
+    name: Deploy GPU Operator
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.action == 'deploy' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install sshpass
+        run: sudo apt-get update && sudo apt-get install -y sshpass
+
+      - name: Deploy GPU Operator
+        env:
+          K3S_SERVER_IP: ${{ github.event.inputs.k3s_server_ip }}
+          VM_USER: ${{ secrets.VM_USER || 'dare' }}
+          VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
+          GPU_TIME_SLICES: ${{ github.event.inputs.gpu_time_slices }}
+          SKIP_DRIVER: ${{ github.event.inputs.skip_driver }}
+          REGISTRY_URL: ${{ github.event.inputs.registry_url }}
+          GPU_OPERATOR_VERSION: ${{ env.GPU_OPERATOR_VERSION }}
+          DRIVER_VERSION: ${{ env.DRIVER_VERSION }}
+          DRIVER_OS: ${{ env.DRIVER_OS }}
+        run: |
+          chmod +x infrastructure/scripts/install-gpu-operator.sh
+          ./infrastructure/scripts/install-gpu-operator.sh
+
+      - name: Verify Deployment
+        env:
+          K3S_SERVER_IP: ${{ github.event.inputs.k3s_server_ip }}
+          VM_USER: ${{ secrets.VM_USER || 'dare' }}
+          VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
+        run: |
+          sshpass -p "${VM_PASSWORD}" ssh -o StrictHostKeyChecking=no \
+            "${VM_USER}@${K3S_SERVER_IP}" \
+            "sudo kubectl get pods -n gpu-operator && \
+             sudo kubectl get nodes -o custom-columns='NAME:.metadata.name,GPU:.status.allocatable.nvidia\.com/gpu'"
+
+  uninstall:
+    name: Uninstall GPU Operator
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.action == 'uninstall' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install sshpass
+        run: sudo apt-get update && sudo apt-get install -y sshpass
+
+      - name: Uninstall GPU Operator
+        env:
+          K3S_SERVER_IP: ${{ github.event.inputs.k3s_server_ip }}
+          VM_USER: ${{ secrets.VM_USER || 'dare' }}
+          VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
+        run: |
+          chmod +x infrastructure/scripts/install-gpu-operator.sh
+          ./infrastructure/scripts/install-gpu-operator.sh --uninstall

@@ -42,7 +42,12 @@ GPU_TIME_SLICES="${GPU_TIME_SLICES:-4}"
 SKIP_DRIVER="${SKIP_DRIVER:-false}"
 GPU_OPERATOR_VERSION="${GPU_OPERATOR_VERSION:-v25.10.1}"
 DRIVER_VERSION="${DRIVER_VERSION:-535.230.02}"
+DRIVER_OS="${DRIVER_OS:-ubuntu22.04}"
 HELM_VERSION="${HELM_VERSION:-v3.13.2}"
+
+# Registry settings for airgapped deployment
+REGISTRY_URL="${REGISTRY_URL:-}"  # e.g., harbor.apps.lab.ocp.lan/nvidia
+USE_PREINSTALLED_DRIVER="${USE_PREINSTALLED_DRIVER:-false}"
 
 # Colors
 RED='\033[0;31m'
@@ -170,14 +175,35 @@ install_gpu_operator() {
     helm_args+=" --set devicePlugin.config.name=time-slicing-config"
     helm_args+=" --set devicePlugin.config.default=any"
 
-    # Skip driver installation if requested (use pre-installed drivers)
-    if [[ "${SKIP_DRIVER}" == "true" ]]; then
+    # Determine registry (airgapped vs online)
+    local registry="nvcr.io/nvidia"
+    if [[ -n "${REGISTRY_URL}" ]]; then
+        registry="${REGISTRY_URL}"
+        log_info "Using private registry: ${registry}"
+    fi
+
+    # Driver configuration
+    if [[ "${SKIP_DRIVER}" == "true" ]] || [[ "${USE_PREINSTALLED_DRIVER}" == "true" ]]; then
         log_info "Skipping NVIDIA driver installation (using pre-installed drivers)"
         helm_args+=" --set driver.enabled=false"
     else
-        # Configure driver version
-        helm_args+=" --set driver.version=${DRIVER_VERSION}"
-        helm_args+=" --set driver.repository=nvcr.io/nvidia"
+        # GPU Operator will install driver via container
+        log_info "GPU Operator will install driver: ${DRIVER_VERSION}-${DRIVER_OS}"
+        helm_args+=" --set driver.enabled=true"
+        helm_args+=" --set driver.repository=${registry}"
+        helm_args+=" --set driver.version=${DRIVER_VERSION}-${DRIVER_OS}"
+    fi
+
+    # Configure all component repositories for airgapped
+    if [[ -n "${REGISTRY_URL}" ]]; then
+        helm_args+=" --set operator.repository=${registry}"
+        helm_args+=" --set toolkit.repository=${registry}"
+        helm_args+=" --set devicePlugin.repository=${registry}"
+        helm_args+=" --set dcgm.repository=${registry}"
+        helm_args+=" --set dcgmExporter.repository=${registry}"
+        helm_args+=" --set gfd.repository=${registry}"
+        helm_args+=" --set driver.manager.repository=${registry}"
+        helm_args+=" --set validator.repository=${registry}"
     fi
 
     # K3s specific settings
@@ -340,6 +366,8 @@ main() {
     log_info "GPU Time Slices: ${GPU_TIME_SLICES}"
     log_info "Skip Driver:     ${SKIP_DRIVER}"
     log_info "Operator Version: ${GPU_OPERATOR_VERSION}"
+    log_info "Driver Version:  ${DRIVER_VERSION}-${DRIVER_OS}"
+    log_info "Registry:        ${REGISTRY_URL:-nvcr.io/nvidia (online)}"
     echo ""
 
     check_prereqs
@@ -380,16 +408,25 @@ Environment Variables:
   VM_USER              SSH user (default: dare)
   GPU_TIME_SLICES      Number of time slices (default: 4)
   SKIP_DRIVER          Skip driver install (default: false)
-  GPU_OPERATOR_VERSION Version to install (default: v23.9.1)
+  GPU_OPERATOR_VERSION Version to install (default: v25.10.1)
+  DRIVER_VERSION       NVIDIA driver version (default: 535.230.02)
+  DRIVER_OS            Driver OS tag (default: ubuntu22.04)
+  REGISTRY_URL         Private registry URL for airgapped (e.g., harbor.apps.lab.ocp.lan/nvidia)
 
 Examples:
-  # Basic installation
+  # Basic installation (online)
   K3S_SERVER_IP=192.168.22.91 VM_PASSWORD=secret ./install-gpu-operator.sh
+
+  # Airgapped installation using Harbor
+  K3S_SERVER_IP=192.168.22.91 VM_PASSWORD=secret \\
+    REGISTRY_URL=harbor.apps.lab.ocp.lan/nvidia \\
+    DRIVER_VERSION=535.230.02 DRIVER_OS=ubuntu22.04 \\
+    ./install-gpu-operator.sh
 
   # With 4 GPU time slices
   K3S_SERVER_IP=192.168.22.91 VM_PASSWORD=secret GPU_TIME_SLICES=4 ./install-gpu-operator.sh
 
-  # Use pre-installed drivers
+  # Use pre-installed drivers (skip GPU Operator driver)
   K3S_SERVER_IP=192.168.22.91 VM_PASSWORD=secret SKIP_DRIVER=true ./install-gpu-operator.sh
 EOF
         ;;

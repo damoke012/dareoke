@@ -33,7 +33,7 @@ set -euo pipefail
 # GPU Operator version
 GPU_OPERATOR_VERSION="${GPU_OPERATOR_VERSION:-v25.10.1}"
 DRIVER_VERSION="${DRIVER_VERSION:-535.230.02}"
-UBUNTU_VERSION="${UBUNTU_VERSION:-ubuntu20.04}"
+DRIVER_OS="${DRIVER_OS:-ubuntu22.04}"
 
 # Output directory
 IMAGE_DIR="${IMAGE_DIR:-./gpu-images}"
@@ -42,6 +42,10 @@ IMAGE_DIR="${IMAGE_DIR:-./gpu-images}"
 REGISTRY_URL="${REGISTRY_URL:-}"
 REGISTRY_USER="${REGISTRY_USER:-}"
 REGISTRY_PASSWORD="${REGISTRY_PASSWORD:-}"
+TLS_VERIFY="${TLS_VERIFY:-false}"
+
+# CI/CD mode (non-interactive, fail on errors)
+CI_MODE="${CI:-false}"
 
 # Colors
 RED='\033[0;31m'
@@ -55,7 +59,8 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_step() { echo -e "${BLUE}[STEP]${NC} $1"; }
 
-# Define all required images
+# Define all required images for GPU Operator v25
+# Note: gpu-feature-discovery requires NGC authentication
 declare -a GPU_IMAGES=(
     # GPU Operator
     "nvcr.io/nvidia/gpu-operator:${GPU_OPERATOR_VERSION}"
@@ -63,8 +68,8 @@ declare -a GPU_IMAGES=(
     # Driver Manager
     "nvcr.io/nvidia/cloud-native/k8s-driver-manager:v0.9.1"
 
-    # NVIDIA Driver (for Ubuntu)
-    "nvcr.io/nvidia/driver:${DRIVER_VERSION}-${UBUNTU_VERSION}"
+    # NVIDIA Driver
+    "nvcr.io/nvidia/driver:${DRIVER_VERSION}-${DRIVER_OS}"
 
     # Container Toolkit
     "nvcr.io/nvidia/k8s/container-toolkit:v1.18.1"
@@ -75,22 +80,23 @@ declare -a GPU_IMAGES=(
     # DCGM Exporter (monitoring)
     "nvcr.io/nvidia/k8s/dcgm-exporter:4.4.2-4.7.0-distroless"
 
-    # GPU Feature Discovery
-    "nvcr.io/nvidia/k8s/gpu-feature-discovery:v0.18.1"
+    # Node Feature Discovery (from k8s.io - no auth required)
+    "registry.k8s.io/nfd/node-feature-discovery:v0.16.4"
 
-    # Node Feature Discovery
-    "registry.k8s.io/nfd/node-feature-discovery:v0.18.2"
-
-    # CUDA base images (for testing)
+    # CUDA base image (for testing)
     "nvcr.io/nvidia/cuda:12.2.0-base-ubuntu22.04"
-    "nvcr.io/nvidia/cuda:12.2.0-runtime-ubuntu22.04"
 )
 
-# Images for different driver versions
+# Optional images that require NGC authentication
+declare -a NGC_AUTH_IMAGES=(
+    "nvcr.io/nvidia/k8s/gpu-feature-discovery:v0.18.1"
+)
+
+# Driver images for different OS versions
 declare -A DRIVER_IMAGES=(
     ["ubuntu20.04"]="nvcr.io/nvidia/driver:${DRIVER_VERSION}-ubuntu20.04"
     ["ubuntu22.04"]="nvcr.io/nvidia/driver:${DRIVER_VERSION}-ubuntu22.04"
-    ["rhel8"]="nvcr.io/nvidia/driver:${DRIVER_VERSION}-rhel8"
+    ["rhel9"]="nvcr.io/nvidia/driver:${DRIVER_VERSION}-rhel9"
 )
 
 list_images() {
@@ -193,15 +199,17 @@ push_images() {
     fi
 
     local runtime=$(detect_container_runtime)
+    local registry_host="${REGISTRY_URL%%/*}"
 
     # Login to registry if credentials provided
     if [[ -n "${REGISTRY_USER}" && -n "${REGISTRY_PASSWORD}" ]]; then
-        log_info "Logging into registry: ${REGISTRY_URL}"
-        echo "${REGISTRY_PASSWORD}" | $runtime login "${REGISTRY_URL%%/*}" -u "${REGISTRY_USER}" --password-stdin
+        log_info "Logging into registry: ${registry_host}"
+        echo "${REGISTRY_PASSWORD}" | $runtime login "${registry_host}" -u "${REGISTRY_USER}" --password-stdin --tls-verify=${TLS_VERIFY}
     fi
 
     log_step "Pushing images to ${REGISTRY_URL}..."
 
+    local failed=()
     for img in "${GPU_IMAGES[@]}"; do
         local src_img="$img"
         local img_name=$(echo "$img" | sed 's|.*/||')
@@ -211,10 +219,74 @@ push_images() {
         $runtime tag "$src_img" "$dst_img"
 
         log_info "Pushing: $dst_img"
-        $runtime push "$dst_img" --tls-verify=false 2>&1 || log_warn "Failed to push: $dst_img"
+        if ! $runtime push "$dst_img" --tls-verify=${TLS_VERIFY} 2>&1; then
+            log_warn "Failed to push: $dst_img"
+            failed+=("$dst_img")
+        fi
     done
 
-    log_info "All images pushed to: ${REGISTRY_URL}"
+    if [[ ${#failed[@]} -gt 0 ]]; then
+        log_warn "Failed to push ${#failed[@]} images:"
+        for img in "${failed[@]}"; do
+            echo "  - $img"
+        done
+        if [[ "${CI_MODE}" == "true" ]]; then
+            exit 1
+        fi
+    else
+        log_info "All images pushed to: ${REGISTRY_URL}"
+    fi
+}
+
+# Push images from local tar files (for airgapped scenarios)
+push_from_tar() {
+    local tar_dir="${1:-${IMAGE_DIR}}"
+
+    if [[ -z "${REGISTRY_URL}" ]]; then
+        log_error "REGISTRY_URL is required for --push-tar"
+        exit 1
+    fi
+
+    if [[ ! -d "$tar_dir" ]]; then
+        log_error "Directory not found: $tar_dir"
+        exit 1
+    fi
+
+    local runtime=$(detect_container_runtime)
+    local registry_host="${REGISTRY_URL%%/*}"
+
+    # Login to registry if credentials provided
+    if [[ -n "${REGISTRY_USER}" && -n "${REGISTRY_PASSWORD}" ]]; then
+        log_info "Logging into registry: ${registry_host}"
+        echo "${REGISTRY_PASSWORD}" | $runtime login "${registry_host}" -u "${REGISTRY_USER}" --password-stdin --tls-verify=${TLS_VERIFY}
+    fi
+
+    log_step "Loading images from ${tar_dir}..."
+    for tar_file in "${tar_dir}"/*.tar "${tar_dir}"/*.tar.gz; do
+        if [[ -f "$tar_file" ]]; then
+            log_info "Loading: $tar_file"
+            if [[ "$tar_file" == *.gz ]]; then
+                gunzip -c "$tar_file" | $runtime load
+            else
+                $runtime load -i "$tar_file"
+            fi
+        fi
+    done
+
+    log_step "Pushing loaded images to ${REGISTRY_URL}..."
+    # Get list of loaded images and push
+    for img in $($runtime images --format '{{.Repository}}:{{.Tag}}' | grep -E 'nvcr.io|registry.k8s.io'); do
+        local img_name=$(echo "$img" | sed 's|.*/||')
+        local dst_img="${REGISTRY_URL}/${img_name}"
+
+        log_info "Tagging: $img -> $dst_img"
+        $runtime tag "$img" "$dst_img"
+
+        log_info "Pushing: $dst_img"
+        $runtime push "$dst_img" --tls-verify=${TLS_VERIFY} 2>&1 || log_warn "Failed to push: $dst_img"
+    done
+
+    log_info "Images pushed to: ${REGISTRY_URL}"
 }
 
 load_images() {
@@ -293,7 +365,7 @@ EOF
 
 show_help() {
     cat << EOF
-GPU Operator Image Sync Tool
+GPU Operator Image Sync Tool for CI/CD
 
 Usage: $0 [OPTIONS]
 
@@ -302,30 +374,44 @@ Options:
   --pull              Pull all images (requires internet)
   --save              Pull and save images to tar files
   --push              Pull and push to private registry
+  --push-tar [DIR]    Load images from tar and push to registry
   --load [DIR]        Load images from tar files on K3s node
   --registry-config   Generate K3s registries.yaml config
   --help, -h          Show this help
 
 Environment Variables:
   GPU_OPERATOR_VERSION  GPU Operator version (default: v25.10.1)
-  DRIVER_VERSION        NVIDIA driver version (default: 580.105.08)
+  DRIVER_VERSION        NVIDIA driver version (default: 535.230.02)
+  DRIVER_OS             Driver OS tag (default: ubuntu22.04)
   IMAGE_DIR             Output directory for tar files (default: ./gpu-images)
   REGISTRY_URL          Target registry URL (for --push)
   REGISTRY_USER         Registry username
   REGISTRY_PASSWORD     Registry password
+  TLS_VERIFY            Verify TLS certificates (default: false)
+  CI                    Set to 'true' for CI mode (fail on errors)
 
-Examples:
+CI/CD Examples:
+  # Push to Harbor in CI pipeline
+  REGISTRY_URL=harbor.example.com/nvidia \\
+  REGISTRY_USER=admin \\
+  REGISTRY_PASSWORD=\$HARBOR_PASSWORD \\
+  CI=true $0 --push
+
+  # Push from saved tar files (airgapped)
+  REGISTRY_URL=harbor.example.com/nvidia \\
+  REGISTRY_USER=admin \\
+  REGISTRY_PASSWORD=\$HARBOR_PASSWORD \\
+  $0 --push-tar /path/to/gpu-images
+
+Manual Examples:
   # List all required images
   $0 --list
 
   # Download and save for airgapped transfer
   $0 --save
 
-  # Push to Harbor registry
-  REGISTRY_URL=harbor.example.com/nvidia $0 --push
-
   # Load images on airgapped K3s node
-  $0 --load /path/to/gpu-images
+  sudo $0 --load /path/to/gpu-images
 
   # Generate K3s mirror config
   $0 --registry-config harbor.example.com
@@ -347,6 +433,9 @@ case "${1:-}" in
     --push)
         pull_images
         push_images
+        ;;
+    --push-tar)
+        push_from_tar "${2:-}"
         ;;
     --load)
         load_images "${2:-}"
