@@ -138,7 +138,9 @@ create_gpu_namespace() {
 create_time_slicing_config() {
     log_step "Creating GPU time-slicing configuration (${GPU_TIME_SLICES} slices)..."
 
-    local config_yaml=$(cat <<EOF
+    # Create the config file locally first, then copy it
+    local tmp_config="/tmp/time-slicing-config-$$.yaml"
+    cat > "$tmp_config" <<EOF
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -157,10 +159,10 @@ data:
           - name: nvidia.com/gpu
             replicas: ${GPU_TIME_SLICES}
 EOF
-)
 
-    echo "$config_yaml" | k3s_sudo "cat > /tmp/time-slicing-config.yaml"
+    k3s_copy "$tmp_config" "/tmp/time-slicing-config.yaml"
     k3s_sudo "kubectl apply -f /tmp/time-slicing-config.yaml"
+    rm -f "$tmp_config"
     log_info "Time-slicing config created with ${GPU_TIME_SLICES} replicas"
 }
 
