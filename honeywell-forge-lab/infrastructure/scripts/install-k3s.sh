@@ -79,7 +79,7 @@ vm_cmd() {
 vm_sudo_cmd() {
     local ip="$1"
     local cmd="$2"
-    sshpass -p "${VM_PASSWORD}" ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=10 "${VM_USER}@${ip}" "echo '${VM_PASSWORD}' | sudo -S bash -c '$cmd'" 2>&1 | grep -v "^\[sudo\] password"
+    sshpass -p "${VM_PASSWORD}" ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=10 "${VM_USER}@${ip}" "echo '${VM_PASSWORD}' | sudo -S bash -c '$cmd'" 2>&1 | { grep -v "^\[sudo\] password" || true; }
 }
 
 vm_copy() {
