@@ -244,11 +244,12 @@ get_k3s_token() {
             echo "$token"
             return 0
         fi
-        log_info "Waiting for token (attempt $i/$retries)..."
+        # Print to stderr so it doesn't get captured in command substitution
+        echo -e "${GREEN}[INFO]${NC} Waiting for token (attempt $i/$retries)..." >&2
         sleep 3
     done
 
-    log_error "Failed to retrieve K3s token after $retries attempts"
+    echo -e "${RED}[ERROR]${NC} Failed to retrieve K3s token after $retries attempts" >&2
     echo ""
     return 0
 }
